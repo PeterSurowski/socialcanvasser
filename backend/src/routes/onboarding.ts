@@ -70,4 +70,114 @@ router.post('/complete', authenticateToken, async (req: AuthRequest, res) => {
   }
 });
 
+// Start a browser connect flow. Placeholder: creates an account record and returns a login URL.
+router.post('/tiktok/connect', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const { nickname } = req.body;
+    if (!nickname) return res.status(400).json({ message: 'Nickname required' });
+
+    const connection = await db.getConnection();
+    await connection.beginTransaction();
+    try {
+      // Insert a placeholder account record; session will be captured by Puppeteer later
+      const [result] = await connection.query(
+        'INSERT INTO tiktok_accounts (user_id, account_identifier, is_active) VALUES (?, ?, ?) ',
+        [userId, nickname, false]
+      );
+
+      await connection.commit();
+      connection.release();
+
+      // TODO: start Puppeteer session and return a connect URL that the user opens.
+      // For now return the TikTok login page as a placeholder.
+      return res.json({ url: 'https://www.tiktok.com/login', accountId: (result as any).insertId });
+    } catch (err) {
+      await connection.rollback();
+      connection.release();
+      throw err;
+    }
+  } catch (err) {
+    console.error('tiktok connect error', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Save manual credentials for an account (placeholder). Backend should encrypt credentials in production.
+router.post('/tiktok/manual', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const { nickname, username, password } = req.body;
+    if (!nickname || !username || !password) return res.status(400).json({ message: 'Missing fields' });
+
+    const connection = await db.getConnection();
+    await connection.beginTransaction();
+    try {
+      // Store a JSON blob in session_data; in real app encrypt this
+      const blob = JSON.stringify({ type: 'manual', username: username, note: 'credentials stored (encrypt in production)' });
+      await connection.query(
+        'INSERT INTO tiktok_accounts (user_id, account_identifier, session_data, is_active) VALUES (?, ?, ?, ?)',
+        [userId, nickname, blob, true]
+      );
+      await connection.commit();
+      connection.release();
+      return res.json({ message: 'Saved' });
+    } catch (err) {
+      await connection.rollback();
+      connection.release();
+      throw err;
+    }
+  } catch (err) {
+    console.error('tiktok manual error', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Finalize a browser-based connect flow. Placeholder marks the account active and stores a small session marker.
+router.post('/tiktok/complete', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const { nickname, accountId } = req.body as { nickname?: string; accountId?: number };
+    if (!nickname && !accountId) return res.status(400).json({ message: 'Nickname or accountId required' });
+
+    const connection = await db.getConnection();
+    await connection.beginTransaction();
+    try {
+      // Find the account by id if provided, otherwise by nickname
+      let rows: any[] = [];
+      if (accountId) {
+        const [r] = await connection.query('SELECT id, account_identifier FROM tiktok_accounts WHERE id = ? AND user_id = ? LIMIT 1', [accountId, userId]);
+        rows = r as any[];
+      } else {
+        const [r] = await connection.query('SELECT id, account_identifier FROM tiktok_accounts WHERE user_id = ? AND account_identifier = ? LIMIT 1', [userId, nickname]);
+        rows = r as any[];
+      }
+
+      if (!rows || rows.length === 0) {
+        await connection.rollback();
+        connection.release();
+        return res.status(404).json({ message: 'Account not found' });
+      }
+
+      const acctId = rows[0].id;
+      const sessionBlob = JSON.stringify({ type: 'browser', status: 'captured_placeholder' });
+      await connection.query('UPDATE tiktok_accounts SET session_data = ?, is_active = ?, last_checked = NOW() WHERE id = ?', [sessionBlob, true, acctId]);
+
+      await connection.commit();
+      connection.release();
+      return res.json({ message: 'Session saved', accountId: acctId });
+    } catch (err) {
+      await connection.rollback();
+      connection.release();
+      console.error('tiktok complete inner error', err);
+      const msg = err && (err as any).message ? (err as any).message : String(err);
+      return res.status(500).json({ message: 'Server error (inner)', error: msg });
+    }
+  } catch (err) {
+    console.error('tiktok complete error', err);
+    const msg = err && (err as any).message ? (err as any).message : String(err);
+    return res.status(500).json({ message: 'Server error', error: msg });
+  }
+});
+
 export default router;

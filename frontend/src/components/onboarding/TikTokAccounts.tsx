@@ -9,16 +9,59 @@ interface TikTokAccountsProps {
 export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAccountsProps) {
   const [showLoginModal, setShowLoginModal] = useState(false)
   const [currentAccountName, setCurrentAccountName] = useState('')
+  const [connectionMethod, setConnectionMethod] = useState<'browser' | 'manual'>('browser')
+  const [manualUsername, setManualUsername] = useState('')
+  const [manualPassword, setManualPassword] = useState('')
+  const [awaitingVerification, setAwaitingVerification] = useState(false)
+  const [pendingAccountId, setPendingAccountId] = useState<number | null>(null)
 
   const handleAddAccount = () => {
+    if (accounts.length >= 10) return
     setShowLoginModal(true)
   }
 
-  const handleLoginComplete = () => {
-    if (currentAccountName) {
-      onUpdate([...accounts, currentAccountName])
-      setCurrentAccountName('')
-      setShowLoginModal(false)
+  const handleLoginComplete = async () => {
+    if (!currentAccountName) return
+
+    try {
+      if (connectionMethod === 'browser') {
+        // Request a connect URL from backend; backend should start a Puppeteer session
+        const token = localStorage.getItem('token')
+        const res = await fetch('/api/onboarding/tiktok/connect', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify({ nickname: currentAccountName })
+        })
+        if (!res.ok) throw new Error('Failed to initiate connect')
+        const data = await res.json()
+        if (data && data.url) {
+          // Open popup for the user to login to TikTok in a real browser window
+          window.open(data.url, '_blank', 'noopener')
+          setAwaitingVerification(true)
+          if (data.accountId) setPendingAccountId(data.accountId)
+        }
+      } else {
+        // Manual credentials path: send to backend for secure storage (backend must handle encryption)
+        const token = localStorage.getItem('token')
+        const res = await fetch('/api/onboarding/tiktok/manual', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify({ nickname: currentAccountName, username: manualUsername, password: manualPassword })
+        })
+        if (!res.ok) throw new Error('Failed to save credentials')
+        // consider verifying server response for success
+        onUpdate([...accounts, currentAccountName])
+        setShowLoginModal(false)
+      }
+    } catch (err) {
+      console.error('Connect error', err)
+      alert('Failed to start connect flow. Please try again.')
     }
   }
 
@@ -59,7 +102,8 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
 
       <button
         onClick={handleAddAccount}
-        className="w-full py-3 border-2 border-dashed border-gray-300 rounded-lg text-gray-600 hover:border-blue-500 hover:text-blue-600 font-medium transition"
+        disabled={accounts.length >= 10}
+        className="w-full py-3 border-2 border-dashed border-gray-300 rounded-lg text-gray-600 hover:border-blue-500 hover:text-blue-600 font-medium transition disabled:opacity-50 disabled:cursor-not-allowed"
       >
         + Add Another Account
       </button>
@@ -77,45 +121,115 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
       {/* Login Modal */}
       {showLoginModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl p-6 max-w-md w-full mx-4">
-            <h3 className="text-xl font-bold text-gray-800 mb-4">Add TikTok Account</h3>
-            <p className="text-gray-600 mb-4">
-              A new window will open where you can log into your TikTok account. Once logged in, we'll save your session.
-            </p>
+            <div className="bg-white rounded-xl p-6 max-w-md w-full mx-4">
+              <h3 className="text-xl font-bold text-gray-800 mb-4">Add TikTok Account</h3>
+              <p className="text-gray-600 mb-4">
+                Choose how you'd like to connect this TikTok account. For Puppeteer automation later, the
+                browser flow will capture a session cookie we can reuse. Manual credential storage is also supported
+                if you prefer to provide username/password (backend must store securely).
+              </p>
 
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Account Nickname (for identification)
-              </label>
-              <input
-                type="text"
-                value={currentAccountName}
-                onChange={(e) => setCurrentAccountName(e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
-                placeholder="e.g., Account 1, Main Account"
-              />
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">Account Nickname</label>
+                <input
+                  type="text"
+                  value={currentAccountName}
+                  onChange={(e) => setCurrentAccountName(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                  placeholder="e.g., Account 1, Main Account"
+                />
+              </div>
+
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">Connection Method</label>
+                <div className="flex gap-4">
+                  <label className="flex items-center gap-2">
+                    <input type="radio" checked={connectionMethod === 'browser'} onChange={() => setConnectionMethod('browser')} />
+                    <span className="text-sm">Browser login (recommended)</span>
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input type="radio" checked={connectionMethod === 'manual'} onChange={() => setConnectionMethod('manual')} />
+                    <span className="text-sm">Manual credentials</span>
+                  </label>
+                </div>
+              </div>
+
+              {connectionMethod === 'manual' && (
+                <div className="space-y-3 mb-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">TikTok Username or Email</label>
+                    <input type="text" value={manualUsername} onChange={(e) => setManualUsername(e.target.value)} className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Password</label>
+                    <input type="password" value={manualPassword} onChange={(e) => setManualPassword(e.target.value)} className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
+                  </div>
+                </div>
+              )}
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => { setShowLoginModal(false); setAwaitingVerification(false); }}
+                  className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                {!awaitingVerification ? (
+                  <button
+                    onClick={handleLoginComplete}
+                    disabled={!currentAccountName || (connectionMethod === 'manual' && (!manualUsername || !manualPassword))}
+                    className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300"
+                  >
+                    {connectionMethod === 'browser' ? 'Open TikTok Login' : 'Save Credentials'}
+                  </button>
+                ) : (
+                  <button
+                    onClick={async () => {
+                      // Ask backend to verify the session and finalize the connection
+                      try {
+                        const token = localStorage.getItem('token')
+                        const payload: any = {}
+                        if (pendingAccountId) payload.accountId = pendingAccountId
+                        else payload.nickname = currentAccountName
+                        const res = await fetch('/api/onboarding/tiktok/complete', {
+                          method: 'POST',
+                          headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`,
+                          },
+                          body: JSON.stringify(payload)
+                        })
+                        if (!res.ok) {
+                          let errText = 'Verification failed'
+                          try {
+                            const body = await res.json()
+                            errText = body && body.error ? body.error : (body && body.message ? body.message : JSON.stringify(body))
+                          } catch (e) {
+                            errText = await res.text().catch(() => 'Verification failed')
+                          }
+                          throw new Error(errText)
+                        }
+                        onUpdate([...accounts, currentAccountName])
+                        setShowLoginModal(false)
+                        setAwaitingVerification(false)
+                        setCurrentAccountName('')
+                        setPendingAccountId(null)
+                      } catch (err) {
+                        console.error(err)
+                        alert('Could not verify login yet. Make sure you completed the login in the opened window.')
+                      }
+                    }}
+                    className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                  >
+                    I've completed login
+                  </button>
+                )}
+              </div>
+
+              <p className="text-xs text-gray-500 mt-4">
+                Note: For browser login we'll capture session cookies (securely) so the automation worker can reuse them. Manual credentials are stored encrypted on the server.
+              </p>
             </div>
-
-            <div className="flex gap-3">
-              <button
-                onClick={() => setShowLoginModal(false)}
-                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleLoginComplete}
-                disabled={!currentAccountName}
-                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300"
-              >
-                Open TikTok Login
-              </button>
-            </div>
-
-            <p className="text-xs text-gray-500 mt-4">
-              Note: Your credentials are never stored. Only session cookies are saved securely.
-            </p>
-          </div>
         </div>
       )}
     </div>

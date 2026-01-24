@@ -20,7 +20,11 @@ CREATE TABLE tiktok_accounts (
     id INT PRIMARY KEY AUTO_INCREMENT,
     user_id INT NOT NULL,
     account_identifier VARCHAR(255) NOT NULL,
-    session_data TEXT, -- Encrypted cookies/session info
+    session_data TEXT, -- Encrypted cookies/session info (JSON blob)
+    session_expires_at TIMESTAMP NULL,
+    last_checked TIMESTAMP NULL,
+    in_use BOOLEAN DEFAULT FALSE,
+    cooldown_until TIMESTAMP NULL,
     is_active BOOLEAN DEFAULT TRUE,
     last_used_at TIMESTAMP NULL,
     actions_count INT DEFAULT 0, -- Track actions for rotation
