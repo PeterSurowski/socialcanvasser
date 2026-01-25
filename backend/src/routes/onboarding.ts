@@ -3,6 +3,7 @@ import { authenticateToken, AuthRequest } from '../middleware/auth.js';
 import db from '../config/database.js';
 import { captureSessionForAccount } from '../workers/puppeteerWorker.js';
 import { startSession, finalizeSession, cancelSession } from '../workers/puppeteerManager.js';
+import { startContainerForAccount, stopContainer } from '../infra/dockerManager.js';
 
 const router = Router();
 
@@ -92,14 +93,18 @@ router.post('/tiktok/connect', authenticateToken, async (req: AuthRequest, res) 
       connection.release();
 
       const acctId = (result as any).insertId
-      // Start a headful Puppeteer session for manual login; user should complete login in that window.
+      // Start a browser container for the user to log in via noVNC; map ports per-account
       try {
-        await startSession(acctId, userId)
+        const { containerId, hostPort, debugPort } = await startContainerForAccount(acctId, nickname)
+        // Persist container info in session_data
+        const connection2 = await db.getConnection()
+        await connection2.query('UPDATE tiktok_accounts SET session_data = ? WHERE id = ?', [JSON.stringify({ type: 'container', containerId, hostPort, debugPort }), acctId])
+        connection2.release()
+        return res.json({ message: 'Container started', accountId: acctId, url: `http://${req.headers.host?.split(':')[0] || 'localhost'}:${hostPort}/`, hostPort, debugPort })
       } catch (err) {
-        console.error('startSession error', err)
+        console.error('start container error', err)
+        return res.status(500).json({ message: 'Failed to start container', error: (err as any).message })
       }
-
-      return res.json({ message: 'Connect started', accountId: acctId });
     } catch (err) {
       await connection.rollback();
       connection.release();
@@ -169,22 +174,45 @@ router.post('/tiktok/complete', authenticateToken, async (req: AuthRequest, res)
 
       const acctId = rows[0].id;
 
-      // If an active headful browser session exists for this account, finalize it and capture cookies.
+      // Try to capture cookies by connecting to the container's debug port (if present in session_data)
       try {
-        const result = await finalizeSession(acctId, userId)
-        const cookies = result.cookies || []
-        await connection.query('UPDATE tiktok_accounts SET session_data = ?, is_active = ?, last_checked = NOW() WHERE id = ?', [JSON.stringify({ type: 'cookies', cookies }), true, acctId]);
-        await connection.commit();
-        connection.release();
-        return res.json({ message: 'Session captured', accountId: acctId });
-      } catch (err) {
-        // If finalize fails, fall back to placeholder marker
-        console.error('finalizeSession error', err)
+        // fetch container info
+        const [r2] = await connection.query('SELECT session_data FROM tiktok_accounts WHERE id = ? LIMIT 1', [acctId])
+        const row = (r2 as any[])[0]
+        let info = null
+        try { info = row.session_data ? JSON.parse(row.session_data) : null } catch(e) { info = null }
+
+        if (info && info.type === 'container' && info.debugPort) {
+          // connect via puppeteer to http://localhost:debugPort
+          const puppeteer = await import('puppeteer')
+          try {
+            const browser = await puppeteer.connect({ browserURL: `http://127.0.0.1:${info.debugPort}` })
+            const page = await browser.newPage()
+            await page.goto('https://www.tiktok.com', { waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {})
+            const cookies = await page.cookies()
+            await connection.query('UPDATE tiktok_accounts SET session_data = ?, is_active = ?, last_checked = NOW() WHERE id = ?', [JSON.stringify({ type: 'cookies', cookies }), true, acctId]);
+            await browser.disconnect()
+            await connection.commit();
+            connection.release();
+            return res.json({ message: 'Session captured', accountId: acctId, cookieCount: cookies.length });
+          } catch (err) {
+            console.error('puppeteer connect error', err)
+            // fallback
+          }
+        }
+
+        // fallback placeholder
         const sessionBlob = JSON.stringify({ type: 'browser', status: 'captured_placeholder' });
         await connection.query('UPDATE tiktok_accounts SET session_data = ?, is_active = ?, last_checked = NOW() WHERE id = ?', [sessionBlob, true, acctId]);
         await connection.commit();
         connection.release();
         return res.json({ message: 'Session saved (placeholder)', accountId: acctId });
+      } catch (err) {
+        await connection.rollback();
+        connection.release();
+        console.error('finalize capture error', err)
+        const msg = err && (err as any).message ? (err as any).message : String(err)
+        return res.status(500).json({ message: 'Capture failed', error: msg })
       }
     } catch (err) {
       await connection.rollback();
