@@ -183,21 +183,41 @@ router.post('/tiktok/complete', authenticateToken, async (req: AuthRequest, res)
         try { info = row.session_data ? JSON.parse(row.session_data) : null } catch(e) { info = null }
 
         if (info && info.type === 'container' && info.debugPort) {
-          // connect via puppeteer to http://localhost:debugPort
-          const puppeteer = await import('puppeteer')
+          // Before attempting Puppeteer, probe the DevTools JSON endpoint to ensure
+          // the container exposes a Chrome DevTools interface at the mapped debug port.
+          const devtoolsUrl = `http://127.0.0.1:${info.debugPort}/json/version`
+          let canConnectToDevtools = false
           try {
-            const browser = await puppeteer.connect({ browserURL: `http://127.0.0.1:${info.debugPort}` })
-            const page = await browser.newPage()
-            await page.goto('https://www.tiktok.com', { waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {})
-            const cookies = await page.cookies()
-            await connection.query('UPDATE tiktok_accounts SET session_data = ?, is_active = ?, last_checked = NOW() WHERE id = ?', [JSON.stringify({ type: 'cookies', cookies }), true, acctId]);
-            await browser.disconnect()
-            await connection.commit();
-            connection.release();
-            return res.json({ message: 'Session captured', accountId: acctId, cookieCount: cookies.length });
-          } catch (err) {
-            console.error('puppeteer connect error', err)
-            // fallback
+            const controller = new AbortController()
+            const timeout = setTimeout(() => controller.abort(), 3000)
+            try {
+              const probe = await fetch(devtoolsUrl, { signal: controller.signal })
+              if (probe && probe.ok) canConnectToDevtools = true
+            } finally {
+              clearTimeout(timeout)
+            }
+          } catch (e) {
+            // devtools endpoint not available or timed out — we'll skip Puppeteer connect
+            canConnectToDevtools = false
+          }
+
+          if (canConnectToDevtools) {
+            const puppeteer = await import('puppeteer')
+            try {
+              const browser = await puppeteer.connect({ browserURL: `http://127.0.0.1:${info.debugPort}` })
+              const page = await browser.newPage()
+              await page.goto('https://www.tiktok.com', { waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {})
+              const cookies = await page.cookies()
+              await connection.query('UPDATE tiktok_accounts SET session_data = ?, is_active = ?, last_checked = NOW() WHERE id = ?', [JSON.stringify({ type: 'cookies', cookies }), true, acctId]);
+              await browser.disconnect()
+              await connection.commit();
+              connection.release();
+              return res.json({ message: 'Session captured', accountId: acctId, cookieCount: cookies.length });
+            } catch (err) {
+              console.warn('puppeteer connect failed; falling back to placeholder session')
+            }
+          } else {
+            console.info('DevTools endpoint not reachable at', devtoolsUrl, '; skipping Puppeteer capture')
           }
         }
 
@@ -245,6 +265,37 @@ router.post('/tiktok/capture', authenticateToken, async (req: AuthRequest, res) 
     }
   } catch (err) {
     console.error('tiktok capture endpoint error', err)
+    return res.status(500).json({ message: 'Server error' })
+  }
+})
+
+// Endpoint polled by the frontend popup to get the UI URL for an account
+router.get('/tiktok/popup-url', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId as number
+    const { accountId } = req.query
+    if (!accountId) return res.status(400).json({ message: 'accountId required' })
+
+    const connection = await db.getConnection()
+    try {
+      const [r] = await connection.query('SELECT session_data FROM tiktok_accounts WHERE id = ? AND user_id = ? LIMIT 1', [accountId, userId])
+      connection.release()
+      const row = (r as any[])[0]
+      if (!row) return res.status(404).json({ message: 'Not found' })
+      let info = null
+      try { info = row.session_data ? JSON.parse(row.session_data) : null } catch(e){ info = null }
+      if (!info) return res.json({})
+
+      if (info.url) return res.json({ url: info.url, hostPort: info.hostPort, debugPort: info.debugPort })
+      if (info.hostPort) return res.json({ url: `http://localhost:${info.hostPort}/`, hostPort: info.hostPort, debugPort: info.debugPort })
+      return res.json({})
+    } catch (err) {
+      connection.release()
+      console.error('popup-url error', err)
+      return res.status(500).json({ message: 'Server error' })
+    }
+  } catch (err) {
+    console.error('popup-url outer error', err)
     return res.status(500).json({ message: 'Server error' })
   }
 })

@@ -5,6 +5,10 @@ const execAsync = util.promisify(exec)
 const IMAGE = process.env.TIKTOK_BROWSER_IMAGE || 'jlesage/chrome:latest'
 const HOST_BASE_PORT = parseInt(process.env.TIKTOK_HOST_PORT_BASE || '7000', 10)
 const HOST_BASE_DEBUG = parseInt(process.env.TIKTOK_HOST_DEBUG_BASE || '9222', 10)
+// The container port that exposes a UI for manual login (noVNC, web UI, etc).
+// Some images (e.g. jlesage/chrome) expose noVNC on 6901, while others
+// (e.g. browserless/chrome) expose a web UI on 3000. Make this configurable.
+const IMAGE_UI_PORT = parseInt(process.env.TIKTOK_BROWSER_IMAGE_UI_PORT || '6901', 10)
 
 export async function startContainerForAccount(accountId: number, nickname: string) {
   const hostPort = HOST_BASE_PORT + accountId
@@ -21,7 +25,7 @@ export async function startContainerForAccount(accountId: number, nickname: stri
     throw new Error(`Failed to pull Docker image ${IMAGE}: ${msg}`)
   }
 
-  const cmd = `docker run -d -p ${hostPort}:6901 -p ${debugPort}:9222 --name ${name} ${IMAGE}`
+  const cmd = `docker run -d -p ${hostPort}:${IMAGE_UI_PORT} -p ${debugPort}:9222 --name ${name} ${IMAGE}`
   try {
     const { stdout } = await execAsync(cmd)
     const containerId = stdout.trim()
