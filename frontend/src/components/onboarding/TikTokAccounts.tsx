@@ -25,7 +25,7 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
 
     try {
       if (connectionMethod === 'browser') {
-        // Request a connect URL from backend; backend should start a Puppeteer session
+        // Request backend to start a headful browser session; user will complete login in that server-launched window
         const token = localStorage.getItem('token')
         const res = await fetch('/api/onboarding/tiktok/connect', {
           method: 'POST',
@@ -37,11 +37,10 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
         })
         if (!res.ok) throw new Error('Failed to initiate connect')
         const data = await res.json()
-        if (data && data.url) {
-          // Open popup for the user to login to TikTok in a real browser window
-          window.open(data.url, '_blank', 'noopener')
+        if (data && data.accountId) {
+          // Server launched a browser for manual login; wait for user to finish in that window
           setAwaitingVerification(true)
-          if (data.accountId) setPendingAccountId(data.accountId)
+          setPendingAccountId(data.accountId)
         }
       } else {
         // Manual credentials path: send to backend for secure storage (backend must handle encryption)

@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { authenticateToken, AuthRequest } from '../middleware/auth.js';
 import db from '../config/database.js';
+import jwt from 'jsonwebtoken';
+import { subscribe, sendUserEvent } from '../events/broadcaster.js';
 
 const router = Router();
 
@@ -93,3 +95,85 @@ router.get('/activity', authenticateToken, async (req: AuthRequest, res) => {
 });
 
 export default router;
+
+// Server-Sent Events for live dashboard feed (accepts token via query for EventSource compatibility)
+router.get('/events', async (req, res) => {
+  try {
+    let token = ''
+    const authHeader = req.headers['authorization']
+    if (authHeader) token = authHeader.split(' ')[1]
+    if (!token && req.query && req.query.token) token = String(req.query.token)
+    if (!token) return res.status(401).end()
+
+    let decoded: any
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret') as any
+    } catch (err) {
+      return res.status(403).end()
+    }
+    const userId = decoded.userId
+
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    res.flushHeaders()
+
+    // Send initial comment
+    res.write(`event: connected\ndata: ${JSON.stringify({ message: 'connected' })}\n\n`)
+
+    const unsub = subscribe(userId, (payload) => {
+      const data = JSON.stringify(payload)
+      res.write(`data: ${data}\n\n`)
+    })
+
+    // heartbeat
+    const iv = setInterval(() => {
+      res.write(': heartbeat\n\n')
+    }, 20000)
+
+    req.on('close', () => {
+      clearInterval(iv)
+      unsub()
+      res.end()
+    })
+  } catch (err) {
+    console.error('SSE error', err)
+    res.status(500).end()
+  }
+})
+
+// Start automation (sets automation_state.is_running=true)
+router.post('/start', async (req: any, res) => {
+  try {
+    const token = req.headers['authorization'] ? String(req.headers['authorization']).split(' ')[1] : ''
+    if (!token) return res.status(401).json({ message: 'Authentication required' })
+    const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret')
+    const userId = decoded.userId
+
+    await db.query('INSERT INTO automation_state (user_id, is_running) VALUES (?, ?) ON DUPLICATE KEY UPDATE is_running = VALUES(is_running)', [userId, true])
+    sendUserEvent(userId, { type: 'status', text: 'Automation started' })
+    res.json({ message: 'Started' })
+  } catch (err) {
+    console.error('Start error', err)
+    res.status(500).json({ message: 'Server error' })
+  }
+})
+
+// Stop automation
+router.post('/stop', async (req: any, res) => {
+  try {
+    const token = req.headers['authorization'] ? String(req.headers['authorization']).split(' ')[1] : ''
+    if (!token) return res.status(401).json({ message: 'Authentication required' })
+    const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret')
+    const userId = decoded.userId
+
+    await db.query('INSERT INTO automation_state (user_id, is_running) VALUES (?, ?) ON DUPLICATE KEY UPDATE is_running = VALUES(is_running)', [userId, false])
+    sendUserEvent(userId, { type: 'status', text: 'Automation stopped' })
+    res.json({ message: 'Stopped' })
+  } catch (err) {
+    console.error('Stop error', err)
+    res.status(500).json({ message: 'Server error' })
+  }
+})
+
+

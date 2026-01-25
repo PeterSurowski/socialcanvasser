@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { authenticateToken, AuthRequest } from '../middleware/auth.js';
 import db from '../config/database.js';
+import { captureSessionForAccount } from '../workers/puppeteerWorker.js';
+import { startSession, finalizeSession, cancelSession } from '../workers/puppeteerManager.js';
 
 const router = Router();
 
@@ -89,9 +91,15 @@ router.post('/tiktok/connect', authenticateToken, async (req: AuthRequest, res) 
       await connection.commit();
       connection.release();
 
-      // TODO: start Puppeteer session and return a connect URL that the user opens.
-      // For now return the TikTok login page as a placeholder.
-      return res.json({ url: 'https://www.tiktok.com/login', accountId: (result as any).insertId });
+      const acctId = (result as any).insertId
+      // Start a headful Puppeteer session for manual login; user should complete login in that window.
+      try {
+        await startSession(acctId, userId)
+      } catch (err) {
+        console.error('startSession error', err)
+      }
+
+      return res.json({ message: 'Connect started', accountId: acctId });
     } catch (err) {
       await connection.rollback();
       connection.release();
@@ -160,12 +168,24 @@ router.post('/tiktok/complete', authenticateToken, async (req: AuthRequest, res)
       }
 
       const acctId = rows[0].id;
-      const sessionBlob = JSON.stringify({ type: 'browser', status: 'captured_placeholder' });
-      await connection.query('UPDATE tiktok_accounts SET session_data = ?, is_active = ?, last_checked = NOW() WHERE id = ?', [sessionBlob, true, acctId]);
 
-      await connection.commit();
-      connection.release();
-      return res.json({ message: 'Session saved', accountId: acctId });
+      // If an active headful browser session exists for this account, finalize it and capture cookies.
+      try {
+        const result = await finalizeSession(acctId, userId)
+        const cookies = result.cookies || []
+        await connection.query('UPDATE tiktok_accounts SET session_data = ?, is_active = ?, last_checked = NOW() WHERE id = ?', [JSON.stringify({ type: 'cookies', cookies }), true, acctId]);
+        await connection.commit();
+        connection.release();
+        return res.json({ message: 'Session captured', accountId: acctId });
+      } catch (err) {
+        // If finalize fails, fall back to placeholder marker
+        console.error('finalizeSession error', err)
+        const sessionBlob = JSON.stringify({ type: 'browser', status: 'captured_placeholder' });
+        await connection.query('UPDATE tiktok_accounts SET session_data = ?, is_active = ?, last_checked = NOW() WHERE id = ?', [sessionBlob, true, acctId]);
+        await connection.commit();
+        connection.release();
+        return res.json({ message: 'Session saved (placeholder)', accountId: acctId });
+      }
     } catch (err) {
       await connection.rollback();
       connection.release();
@@ -179,5 +199,26 @@ router.post('/tiktok/complete', authenticateToken, async (req: AuthRequest, res)
     return res.status(500).json({ message: 'Server error', error: msg });
   }
 });
+
+// Trigger session capture for an account (manual invocation)
+router.post('/tiktok/capture', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId as number
+    const { accountId } = req.body
+    if (!accountId) return res.status(400).json({ message: 'accountId required' })
+
+    // Run the capture (best-effort)
+    try {
+      await captureSessionForAccount(parseInt(accountId, 10), userId)
+      return res.json({ message: 'Capture initiated' })
+    } catch (err) {
+      console.error('capture error', err)
+      return res.status(500).json({ message: 'Capture failed', error: (err as any).message })
+    }
+  } catch (err) {
+    console.error('tiktok capture endpoint error', err)
+    return res.status(500).json({ message: 'Server error' })
+  }
+})
 
 export default router;
