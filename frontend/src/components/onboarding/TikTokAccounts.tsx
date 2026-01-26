@@ -23,8 +23,13 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
   const handleLoginComplete = async () => {
     if (!currentAccountName) return
 
-    try {
+      try {
       if (connectionMethod === 'browser') {
+        // Open a same-origin waiting page synchronously to avoid popup blockers.
+        // The waiting page (`/onboarding-popup.html`) polls the backend for the container URL.
+        const popupToken = Math.random().toString(36).slice(2)
+        const popup = window.open(`/onboarding-popup.html?token=${popupToken}`, '_blank', 'noopener,width=1000,height=800')
+
         // Request backend to start a headful browser session; user will complete login in that server-launched window
         const token = localStorage.getItem('token')
         const res = await fetch('/api/onboarding/tiktok/connect', {
@@ -35,12 +40,27 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
           },
           body: JSON.stringify({ nickname: currentAccountName })
         })
-        if (!res.ok) throw new Error('Failed to initiate connect')
+        if (!res.ok) {
+          // close popup if backend failed to start
+          try { popup && popup.close() } catch (_) {}
+          throw new Error('Failed to initiate connect')
+        }
         const data = await res.json()
         if (data && data.accountId) {
           // Server launched a browser for manual login; wait for user to finish in that window
           setAwaitingVerification(true)
           setPendingAccountId(data.accountId)
+          try {
+            // store the accountId under the popup token so the waiting page can pick it up
+            localStorage.setItem('sc_popup_token_' + popupToken, String(data.accountId))
+          } catch (e) {}
+
+          // If backend provided a direct URL, try navigating the popup immediately.
+          if (data.url && popup) {
+            try { (popup as any).location.href = data.url } catch (_) { /* popup will poll */ }
+          }
+        } else {
+          try { popup && popup.close() } catch (_) {}
         }
       } else {
         // Manual credentials path: send to backend for secure storage (backend must handle encryption)
@@ -184,30 +204,35 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
                 ) : (
                   <button
                     onClick={async () => {
-                      // Ask backend to verify the session and finalize the connection
                       try {
                         const token = localStorage.getItem('token')
                         const payload: any = {}
                         if (pendingAccountId) payload.accountId = pendingAccountId
                         else payload.nickname = currentAccountName
+
                         const res = await fetch('/api/onboarding/tiktok/complete', {
                           method: 'POST',
                           headers: {
                             'Content-Type': 'application/json',
                             'Authorization': `Bearer ${token}`,
                           },
-                          body: JSON.stringify(payload)
+                          body: JSON.stringify(payload),
                         })
+
                         if (!res.ok) {
-                          let errText = 'Verification failed'
+                          let bodyText = 'Failed to verify connect'
                           try {
                             const body = await res.json()
-                            errText = body && body.error ? body.error : (body && body.message ? body.message : JSON.stringify(body))
-                          } catch (e) {
-                            errText = await res.text().catch(() => 'Verification failed')
+                            bodyText = body && (body.error || body.message) ? (body.error || body.message) : JSON.stringify(body)
+                          } catch (_) {
+                            bodyText = await res.text().catch(() => 'Failed to verify connect')
                           }
-                          throw new Error(errText)
+                          throw new Error(bodyText)
                         }
+
+                        const data = await res.json()
+                        if (!data || !data.accountId) throw new Error('Verify did not return accountId')
+
                         onUpdate([...accounts, currentAccountName])
                         setShowLoginModal(false)
                         setAwaitingVerification(false)

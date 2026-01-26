@@ -1,0 +1,72 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Waiting for Login</title>
+  <style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}#box{max-width:600px;text-align:center;padding:20px;border-radius:8px;border:1px solid #e5e7eb}</style>
+</head>
+<body>
+  <div id="box">
+    <h2>Preparing login page...</h2>
+    <p id="status">Waiting for the main app to provision the login session.</p>
+    <p id="actions" style="display:none"><a id="openLink" href="#" target="_blank">Open login in new tab</a></p>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(location.search)
+    const token = params.get('token')
+    const statusEl = document.getElementById('status')
+    const actionsEl = document.getElementById('actions')
+    const openLink = document.getElementById('openLink')
+
+    function sleep(ms){return new Promise(r => setTimeout(r, ms))}
+
+    async function waitForAccountId(){
+      if (!token) return null
+      const key = 'sc_popup_token_' + token
+      for (let i=0;i<60;i++){
+        try {
+          const v = localStorage.getItem(key)
+          if (v) return v
+        } catch(e){}
+        await sleep(1000)
+      }
+      return null
+    }
+
+    async function pollForUrl(accountId){
+      statusEl.textContent = 'Provisioned account id ' + accountId + '. Waiting for container UI...'
+      const authToken = localStorage.getItem('token')
+      const headers = authToken ? { 'Authorization': 'Bearer ' + authToken } : {}
+      for (let i=0;i<60;i++){
+        try {
+          const res = await fetch('/api/onboarding/tiktok/popup-url?accountId=' + encodeURIComponent(accountId), { headers })
+          if (res.status === 401) {
+            statusEl.textContent = 'Authentication required. Please make sure you are logged in in the main app and try again.'
+            return
+          }
+          if (res.ok){
+            const json = await res.json()
+            if (json && json.url){
+              statusEl.textContent = 'Opening login page...'
+              // navigate to the URL
+              window.location.href = json.url
+              return
+            }
+          }
+        } catch(e){/* ignore */}
+        await sleep(1000)
+      }
+      statusEl.textContent = 'Timed out waiting for container UI. You can try opening the host port manually.'
+      actionsEl.style.display = 'block'
+      openLink.href = 'about:blank'
+    }
+
+    (async ()=>{
+      const accountId = await waitForAccountId()
+      if (!accountId){ statusEl.textContent = 'No account id received from the app. Close and try again.'; return }
+      await pollForUrl(accountId)
+    })()
+  </script>
+</body>
+</html>

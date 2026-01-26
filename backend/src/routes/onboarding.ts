@@ -95,10 +95,11 @@ router.post('/tiktok/connect', authenticateToken, async (req: AuthRequest, res) 
       const acctId = (result as any).insertId
       // Start a browser container for the user to log in via noVNC; map ports per-account
       try {
-        const { containerId, hostPort, debugPort } = await startContainerForAccount(acctId, nickname)
-        // Persist container info in session_data
+        const { containerId, hostPort, debugPort, volumeName } = await startContainerForAccount(acctId, nickname)
+        // Persist container info (including volume) in session_data so we can
+        // reconnect Puppeteer to the running browser or reuse the profile.
         const connection2 = await db.getConnection()
-        await connection2.query('UPDATE tiktok_accounts SET session_data = ? WHERE id = ?', [JSON.stringify({ type: 'container', containerId, hostPort, debugPort }), acctId])
+        await connection2.query('UPDATE tiktok_accounts SET session_data = ? WHERE id = ?', [JSON.stringify({ type: 'container', containerId, hostPort, debugPort, volumeName }), acctId])
         connection2.release()
         return res.json({ message: 'Container started', accountId: acctId, url: `http://${req.headers.host?.split(':')[0] || 'localhost'}:${hostPort}/`, hostPort, debugPort })
       } catch (err) {
@@ -202,8 +203,8 @@ router.post('/tiktok/complete', authenticateToken, async (req: AuthRequest, res)
           }
 
           if (canConnectToDevtools) {
-            const puppeteer = await import('puppeteer')
             try {
+              const puppeteer = await import('puppeteer-core')
               const browser = await puppeteer.connect({ browserURL: `http://127.0.0.1:${info.debugPort}` })
               const page = await browser.newPage()
               await page.goto('https://www.tiktok.com', { waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {})
@@ -214,11 +215,35 @@ router.post('/tiktok/complete', authenticateToken, async (req: AuthRequest, res)
               connection.release();
               return res.json({ message: 'Session captured', accountId: acctId, cookieCount: cookies.length });
             } catch (err) {
-              console.warn('puppeteer connect failed; falling back to placeholder session')
+              console.warn('puppeteer connect failed; falling back to other capture methods', err)
             }
-          } else {
-            console.info('DevTools endpoint not reachable at', devtoolsUrl, '; skipping Puppeteer capture')
           }
+
+          // Attempt a browserless-style websocket connection using hostPort if available
+          if (info.hostPort) {
+            try {
+              const puppeteer = await import('puppeteer-core')
+              const wsEndpoint = `ws://127.0.0.1:${info.hostPort}`
+              const browser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint })
+              try {
+                const page = await browser.newPage()
+                await page.goto('https://www.tiktok.com', { waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {})
+                const cookies = await page.cookies()
+                await connection.query('UPDATE tiktok_accounts SET session_data = ?, is_active = ?, last_checked = NOW() WHERE id = ?', [JSON.stringify({ type: 'cookies', cookies }), true, acctId]);
+                await browser.disconnect()
+                await connection.commit();
+                connection.release();
+                return res.json({ message: 'Session captured', accountId: acctId, cookieCount: cookies.length });
+              } catch (innerErr) {
+                console.warn('browserless puppeteer flow failed', innerErr)
+                try { await browser.disconnect() } catch(e){}
+              }
+            } catch (connErr) {
+              console.info('browserless websocket not reachable at', `ws://127.0.0.1:${info.hostPort}`, connErr)
+            }
+          }
+
+          console.info('DevTools endpoint not reachable at', devtoolsUrl, '; skipping Puppeteer capture')
         }
 
         // fallback placeholder
@@ -274,6 +299,7 @@ router.get('/tiktok/popup-url', authenticateToken, async (req: AuthRequest, res)
   try {
     const userId = req.userId as number
     const { accountId } = req.query
+    console.log('[popup-url] request', { userId, accountId, ip: req.ip })
     if (!accountId) return res.status(400).json({ message: 'accountId required' })
 
     const connection = await db.getConnection()
@@ -281,13 +307,25 @@ router.get('/tiktok/popup-url', authenticateToken, async (req: AuthRequest, res)
       const [r] = await connection.query('SELECT session_data FROM tiktok_accounts WHERE id = ? AND user_id = ? LIMIT 1', [accountId, userId])
       connection.release()
       const row = (r as any[])[0]
+      console.log('[popup-url] db row', !!row)
       if (!row) return res.status(404).json({ message: 'Not found' })
       let info = null
       try { info = row.session_data ? JSON.parse(row.session_data) : null } catch(e){ info = null }
-      if (!info) return res.json({})
+      if (!info) {
+        console.log('[popup-url] no session_data for account')
+        return res.json({})
+      }
 
-      if (info.url) return res.json({ url: info.url, hostPort: info.hostPort, debugPort: info.debugPort })
-      if (info.hostPort) return res.json({ url: `http://localhost:${info.hostPort}/`, hostPort: info.hostPort, debugPort: info.debugPort })
+      if (info.url) {
+        console.log('[popup-url] returning url', info.url)
+        return res.json({ url: info.url, hostPort: info.hostPort, debugPort: info.debugPort })
+      }
+      if (info.hostPort) {
+        const u = `http://localhost:${info.hostPort}/`
+        console.log('[popup-url] returning hostPort url', u)
+        return res.json({ url: u, hostPort: info.hostPort, debugPort: info.debugPort })
+      }
+      console.log('[popup-url] session_data present but no ui url/hostPort')
       return res.json({})
     } catch (err) {
       connection.release()
