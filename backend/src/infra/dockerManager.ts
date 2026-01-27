@@ -31,9 +31,14 @@ export async function startContainerForAccount(accountId: number, nickname: stri
   try {
     await execAsync(`docker pull ${IMAGE}`)
   } catch (pullErr: any) {
-    // continue — pull may fail due to auth but the subsequent run will show the same error; include stderr
-    const msg = pullErr && pullErr.stderr ? pullErr.stderr.toString() : String(pullErr)
-    throw new Error(`Failed to pull Docker image ${IMAGE}: ${msg}`)
+    // If pull fails (common for local images), check whether the image exists locally
+    try {
+      await execAsync(`docker image inspect ${IMAGE}`)
+      // image exists locally — continue without pulling
+    } catch (inspectErr: any) {
+      const msg = pullErr && pullErr.stderr ? pullErr.stderr.toString() : String(pullErr)
+      throw new Error(`Failed to pull Docker image ${IMAGE}: ${msg}`)
+    }
   }
 
   // Ensure a persistent Docker volume exists for this account so the browser
