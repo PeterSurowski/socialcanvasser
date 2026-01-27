@@ -6,6 +6,7 @@ import onboardingRoutes from './routes/onboarding.js';
 import dashboardRoutes from './routes/dashboard.js';
 import settingsRoutes from './routes/settings.js';
 import { startAutomationWorker } from './workers/automation.js';
+import { startTikTokSearchWorker } from './workers/tiktokSearchWorker.js';
 
 dotenv.config();
 
@@ -30,6 +31,9 @@ app.get('/api/health', (req, res) => {
 // Start server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  
+  // Start TikTok search worker
+  startTikTokSearchWorker();
   
   // Start automation worker in production
   if (process.env.NODE_ENV === 'production') {

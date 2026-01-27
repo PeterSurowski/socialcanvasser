@@ -12,7 +12,7 @@ const HOST_BASE_DEBUG = parseInt(process.env.TIKTOK_HOST_DEBUG_BASE || '9222', 1
 let IMAGE_UI_PORT = process.env.TIKTOK_BROWSER_IMAGE_UI_PORT ? parseInt(process.env.TIKTOK_BROWSER_IMAGE_UI_PORT, 10) : undefined
 if (!IMAGE_UI_PORT) {
   if (IMAGE.includes('headful-chrome')) {
-    IMAGE_UI_PORT = 9223 // nginx proxy to DevTools / UI inside the headful image
+    IMAGE_UI_PORT = 6080 // noVNC web UI port
   } else if (IMAGE.includes('jlesage') || IMAGE.includes('selenium') ) {
     IMAGE_UI_PORT = 6901 // common noVNC port
   } else {

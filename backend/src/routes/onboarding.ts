@@ -96,10 +96,20 @@ router.post('/tiktok/connect', authenticateToken, async (req: AuthRequest, res) 
       // Start a browser container for the user to log in via noVNC; map ports per-account
       try {
         const { containerId, hostPort, debugPort, volumeName } = await startContainerForAccount(acctId, nickname)
+        
         // Persist container info (including volume) in session_data so we can
         // reconnect Puppeteer to the running browser or reuse the profile.
         const connection2 = await db.getConnection()
-        await connection2.query('UPDATE tiktok_accounts SET session_data = ? WHERE id = ?', [JSON.stringify({ type: 'container', containerId, hostPort, debugPort, volumeName }), acctId])
+        await connection2.query('UPDATE tiktok_accounts SET session_data = ? WHERE id = ?', [
+          JSON.stringify({ 
+            type: 'container', 
+            containerId, 
+            hostPort, 
+            debugPort, 
+            volumeName
+          }), 
+          acctId
+        ])
         connection2.release()
         return res.json({ message: 'Container started', accountId: acctId, url: `http://${req.headers.host?.split(':')[0] || 'localhost'}:${hostPort}/`, hostPort, debugPort })
       } catch (err) {
@@ -321,8 +331,9 @@ router.get('/tiktok/popup-url', authenticateToken, async (req: AuthRequest, res)
         return res.json({ url: info.url, hostPort: info.hostPort, debugPort: info.debugPort })
       }
       if (info.hostPort) {
-        const u = `http://localhost:${info.hostPort}/`
-        console.log('[popup-url] returning hostPort url', u)
+        // Return noVNC URL for headful-chrome containers
+        const u = `http://localhost:${info.hostPort}/vnc.html?autoconnect=true&password=password`
+        console.log('[popup-url] returning noVNC url', u)
         return res.json({ url: u, hostPort: info.hostPort, debugPort: info.debugPort })
       }
       console.log('[popup-url] session_data present but no ui url/hostPort')
