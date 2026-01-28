@@ -51,7 +51,7 @@ export async function startContainerForAccount(accountId: number, nickname: stri
     // ignore volume create errors (may already exist)
   }
 
-  const cmd = `docker run -d -p ${hostPort}:${IMAGE_UI_PORT} -p ${debugPort}:9222 --name ${name} -v ${volumeName}:/data ${IMAGE}`
+  const cmd = `docker run -d -p ${hostPort}:${IMAGE_UI_PORT} -p ${debugPort}:9223 --name ${name} -v ${volumeName}:/data ${IMAGE}`
   try {
     const { stdout } = await execAsync(cmd)
     const containerId = stdout.trim()

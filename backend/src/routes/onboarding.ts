@@ -256,12 +256,11 @@ router.post('/tiktok/complete', authenticateToken, async (req: AuthRequest, res)
           console.info('DevTools endpoint not reachable at', devtoolsUrl, '; skipping Puppeteer capture')
         }
 
-        // fallback placeholder
-        const sessionBlob = JSON.stringify({ type: 'browser', status: 'captured_placeholder' });
-        await connection.query('UPDATE tiktok_accounts SET session_data = ?, is_active = ?, last_checked = NOW() WHERE id = ?', [sessionBlob, true, acctId]);
+        // Don't overwrite the container info! Just mark as active
+        await connection.query('UPDATE tiktok_accounts SET is_active = ?, last_checked = NOW() WHERE id = ?', [true, acctId]);
         await connection.commit();
         connection.release();
-        return res.json({ message: 'Session saved (placeholder)', accountId: acctId });
+        return res.json({ message: 'Session ready (container info preserved)', accountId: acctId });
       } catch (err) {
         await connection.rollback();
         connection.release();
@@ -348,5 +347,74 @@ router.get('/tiktok/popup-url', authenticateToken, async (req: AuthRequest, res)
     return res.status(500).json({ message: 'Server error' })
   }
 })
+
+// Import cookies from manual desktop login
+router.post('/tiktok/import-cookies', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const { accountId, cookies } = req.body as { accountId: number; cookies: any[] };
+    
+    if (!accountId || !cookies || !Array.isArray(cookies) || cookies.length === 0) {
+      return res.status(400).json({ message: 'accountId and cookies array required' });
+    }
+
+    const connection = await db.getConnection();
+    await connection.beginTransaction();
+    
+    try {
+      // Verify account belongs to user
+      const [rows] = await connection.query(
+        'SELECT id, session_data FROM tiktok_accounts WHERE id = ? AND user_id = ?',
+        [accountId, userId]
+      );
+      
+      if (!Array.isArray(rows) || rows.length === 0) {
+        await connection.rollback();
+        connection.release();
+        return res.status(404).json({ message: 'Account not found' });
+      }
+
+      const account = (rows as any)[0];
+      let sessionData: any = {};
+      
+      // Parse existing session_data to preserve container info
+      try {
+        if (account.session_data) {
+          sessionData = JSON.parse(account.session_data);
+        }
+      } catch (e) {
+        console.warn('Failed to parse existing session_data, starting fresh');
+      }
+
+      // Add cookies to session_data
+      sessionData.type = 'cookies';
+      sessionData.cookies = cookies;
+      sessionData.importedAt = new Date().toISOString();
+
+      // Update account with cookies and mark as active
+      await connection.query(
+        'UPDATE tiktok_accounts SET session_data = ?, is_active = ?, last_checked = NOW() WHERE id = ?',
+        [JSON.stringify(sessionData), true, accountId]
+      );
+
+      await connection.commit();
+      connection.release();
+
+      console.log(`[import-cookies] Imported ${cookies.length} cookies for account ${accountId}`);
+      return res.json({ 
+        message: 'Cookies imported successfully', 
+        cookieCount: cookies.length 
+      });
+
+    } catch (err) {
+      await connection.rollback();
+      connection.release();
+      throw err;
+    }
+  } catch (err) {
+    console.error('[import-cookies] error', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
 
 export default router;

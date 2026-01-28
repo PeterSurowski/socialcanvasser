@@ -9,9 +9,10 @@ interface TikTokAccountsProps {
 export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAccountsProps) {
   const [showLoginModal, setShowLoginModal] = useState(false)
   const [currentAccountName, setCurrentAccountName] = useState('')
-  const [connectionMethod, setConnectionMethod] = useState<'browser' | 'manual'>('browser')
+  const [connectionMethod, setConnectionMethod] = useState<'browser' | 'manual' | 'cookies'>('cookies')
   const [manualUsername, setManualUsername] = useState('')
   const [manualPassword, setManualPassword] = useState('')
+  const [cookiesJson, setCookiesJson] = useState('')
   const [awaitingVerification, setAwaitingVerification] = useState(false)
   const [pendingAccountId, setPendingAccountId] = useState<number | null>(null)
 
@@ -24,7 +25,59 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
     if (!currentAccountName) return
 
       try {
-      if (connectionMethod === 'browser') {
+      if (connectionMethod === 'cookies') {
+        // Cookie import flow: create account then import cookies
+        const token = localStorage.getItem('token')
+        
+        // Parse cookies JSON
+        let parsedCookies;
+        try {
+          parsedCookies = JSON.parse(cookiesJson);
+          if (!Array.isArray(parsedCookies)) {
+            throw new Error('Cookies must be a JSON array');
+          }
+        } catch (e) {
+          alert('Invalid JSON format. Please paste a valid JSON array of cookies.');
+          return;
+        }
+        
+        // Create account first
+        const createRes = await fetch('/api/onboarding/tiktok/connect', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify({ nickname: currentAccountName })
+        });
+        
+        if (!createRes.ok) {
+          throw new Error('Failed to create account');
+        }
+        
+        const createData = await createRes.json();
+        const accountId = createData.accountId;
+        
+        // Import cookies
+        const importRes = await fetch('/api/onboarding/tiktok/import-cookies', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify({ accountId, cookies: parsedCookies })
+        });
+        
+        if (!importRes.ok) {
+          throw new Error('Failed to import cookies');
+        }
+        
+        onUpdate([...accounts, currentAccountName]);
+        setShowLoginModal(false);
+        setCurrentAccountName('');
+        setCookiesJson('');
+        
+      } else if (connectionMethod === 'browser') {
         // Open a same-origin waiting page synchronously to avoid popup blockers.
         // The waiting page (`/onboarding-popup.html`) polls the backend for the container URL.
         const popupToken = Math.random().toString(36).slice(2)
@@ -161,10 +214,14 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
 
               <div className="mb-4">
                 <label className="block text-sm font-medium text-gray-700 mb-2">Connection Method</label>
-                <div className="flex gap-4">
+                <div className="flex flex-col gap-2">
+                  <label className="flex items-center gap-2">
+                    <input type="radio" checked={connectionMethod === 'cookies'} onChange={() => setConnectionMethod('cookies')} />
+                    <span className="text-sm">Import cookies (recommended)</span>
+                  </label>
                   <label className="flex items-center gap-2">
                     <input type="radio" checked={connectionMethod === 'browser'} onChange={() => setConnectionMethod('browser')} />
-                    <span className="text-sm">Browser login (recommended)</span>
+                    <span className="text-sm">Browser login (Docker)</span>
                   </label>
                   <label className="flex items-center gap-2">
                     <input type="radio" checked={connectionMethod === 'manual'} onChange={() => setConnectionMethod('manual')} />
@@ -172,6 +229,27 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
                   </label>
                 </div>
               </div>
+
+              {connectionMethod === 'cookies' && (
+                <div className="space-y-3 mb-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      TikTok Cookies (JSON format)
+                    </label>
+                    <textarea
+                      value={cookiesJson}
+                      onChange={(e) => setCookiesJson(e.target.value)}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg font-mono text-sm h-32"
+                      placeholder='Paste cookies here as JSON array...'
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      1. Log into TikTok in your desktop Chrome<br/>
+                      2. Open DevTools (F12) → Application → Cookies → tiktok.com<br/>
+                      3. Copy all cookies and paste as JSON array here
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {connectionMethod === 'manual' && (
                 <div className="space-y-3 mb-4">
@@ -196,10 +274,10 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
                 {!awaitingVerification ? (
                   <button
                     onClick={handleLoginComplete}
-                    disabled={!currentAccountName || (connectionMethod === 'manual' && (!manualUsername || !manualPassword))}
+                    disabled={!currentAccountName || (connectionMethod === 'manual' && (!manualUsername || !manualPassword)) || (connectionMethod === 'cookies' && !cookiesJson)}
                     className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300"
                   >
-                    {connectionMethod === 'browser' ? 'Open TikTok Login' : 'Save Credentials'}
+                    {connectionMethod === 'cookies' ? 'Import Cookies' : connectionMethod === 'browser' ? 'Open TikTok Login' : 'Save Credentials'}
                   </button>
                 ) : (
                   <button

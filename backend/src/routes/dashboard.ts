@@ -3,6 +3,8 @@ import { authenticateToken, AuthRequest } from '../middleware/auth.js';
 import db from '../config/database.js';
 import jwt from 'jsonwebtoken';
 import { subscribe, sendUserEvent } from '../events/broadcaster.js';
+import { runTikTokSearchForAccounts } from '../workers/tiktokSearchWorker.js';
+import { runTikTokFeedForAccounts } from '../workers/tiktokFeedWorker.js';
 
 const router = Router();
 
@@ -151,7 +153,14 @@ router.post('/start', async (req: any, res) => {
     const userId = decoded.userId
 
     await db.query('INSERT INTO automation_state (user_id, is_running) VALUES (?, ?) ON DUPLICATE KEY UPDATE is_running = VALUES(is_running)', [userId, true])
-    sendUserEvent(userId, { type: 'status', text: 'Automation started' })
+    sendUserEvent(userId, { type: 'status', text: 'Automation started - scraping TikTok feed...' })
+    
+    // Use feed scraping instead of search (search is heavily rate-limited)
+    runTikTokFeedForAccounts(userId).catch(err => {
+      console.error('[Dashboard] TikTok feed scrape failed:', err)
+      sendUserEvent(userId, { type: 'error', text: 'Failed to scrape TikTok feed' })
+    })
+    
     res.json({ message: 'Started' })
   } catch (err) {
     console.error('Start error', err)
