@@ -62,7 +62,8 @@ export async function scrapeTikTokFeed(accountId: number, keywords: string[], ma
       console.log(`[TikTok Feed] Navigation timeout, continuing...`);
     });
     
-    await page.waitForTimeout(3000); // Wait for initial posts to load
+    // Wait for initial posts to load
+    await new Promise(resolve => setTimeout(resolve, 3000));
     
     const foundPosts: TikTokPost[] = [];
     let scrollAttempts = 0;
@@ -142,7 +143,7 @@ export async function scrapeTikTokFeed(accountId: number, keywords: string[], ma
       });
       
       // Random delay between scrolls
-      await page.waitForTimeout(2000 + Math.random() * 2000);
+      await new Promise(resolve => setTimeout(resolve, 2000 + Math.random() * 2000));
     }
     
     await browser.disconnect();

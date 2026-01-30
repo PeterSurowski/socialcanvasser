@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events'
 
-type Payload = { type: string; text: string; meta?: any }
+type Payload = { type: string; text: string; url?: string; meta?: any }
 
 const emitter = new EventEmitter()
 
