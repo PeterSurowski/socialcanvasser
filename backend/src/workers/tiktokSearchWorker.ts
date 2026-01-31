@@ -356,15 +356,9 @@ export async function searchTikTokByKeywords(
                 timeout: 15000 
               });
               console.log(`[TikTok Search] Video content detected!`);
-            } catch (err) {
-              console.log(`[TikTok Search] Video page content didn't load, skipping this video`);
-              await page.goBack();
-              await new Promise(resolve => setTimeout(resolve, 2000));
-              continue;
-            }
               
-            // Wait additional time for comments section to render
-            await new Promise(resolve => setTimeout(resolve, 2000));
+              // Wait additional time for comments section to render
+              await new Promise(resolve => setTimeout(resolve, 2000));
               
               // Click the comments button to reveal the comments section
               console.log(`[TikTok Search] Clicking comments button to reveal comments...`);

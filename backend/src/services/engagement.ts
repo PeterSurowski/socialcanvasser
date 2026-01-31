@@ -84,21 +84,34 @@ export async function tryToSendDM(
   try {
     console.log(`[Engagement] 🔍 Step 1/5: Attempting to DM @${username}...`);
     
+    // Track navigation events
+    page.on('framenavigated', (frame) => {
+      if (frame === page.mainFrame()) {
+        console.log(`[Engagement] 🔄 Page navigated to: ${frame.url()}`);
+      }
+    });
+    
     // Step 1: Navigate to user's profile
-    console.log(`[Engagement] 🔍 Step 2/5: Navigating to profile: https://www.tiktok.com/@${username}`);
-    await page.goto(`https://www.tiktok.com/@${username}`, {
+    const profileUrl = `https://www.tiktok.com/@${username}`;
+    console.log(`[Engagement] 🔍 Step 2/5: Navigating to profile: ${profileUrl}`);
+    await page.goto(profileUrl, {
       waitUntil: 'networkidle2',
       timeout: 15000
     });
     
     await new Promise(resolve => setTimeout(resolve, 2000));
-    console.log(`[Engagement] ✅ Step 2/5: Profile page loaded: ${page.url()}`);
+    const afterProfileUrl = page.url();
+    console.log(`[Engagement] ✅ Step 2/5: Profile page loaded: ${afterProfileUrl}`);
     
+    // Verify we're actually on the profile page
+    if (!afterProfileUrl.includes(`/@${username}`)) {
+      console.log(`[Engagement] ⚠️ Unexpected URL after profile navigation. Expected: ${profileUrl}, Got: ${afterProfileUrl}`);
+    }    
     // Step 2: Wait for profile page content to load (either Message button or Follow button)
     console.log(`[Engagement] 🔍 Step 3/5: Waiting for profile content to load...`);
     try {
-      // Wait for either Message button, Follow button, or any profile action button to appear
-      await page.waitForSelector('button[data-e2e="message-button"], button[data-e2e="follow-button"], button', { 
+      // Wait for SPECIFIC profile buttons only - don't use generic 'button' selector
+      await page.waitForSelector('button[data-e2e="message-button"], button[data-e2e="follow-button"], [data-e2e="user-avatar"]', { 
         timeout: 10000 
       });
       console.log(`[Engagement] ✅ Profile content loaded`);
@@ -155,7 +168,9 @@ export async function tryToSendDM(
     console.log(`[Engagement] Message button check result:`, messageButtonCheck);
     
     if (!messageButtonCheck.found) {
+      const currentUrl = page.url();
       console.log(`[Engagement] ❌ Step 3/5 FAILED: Message button not found`);
+      console.log(`[Engagement] 🔍 Current page when exiting tryToSendDM: ${currentUrl}`);
       if (messageButtonCheck.diagnostics) {
         console.log(`[Engagement] 🔍 DIAGNOSTICS:`);
         console.log(`  - Total buttons on page: ${messageButtonCheck.diagnostics.totalButtons}`);
@@ -163,55 +178,109 @@ export async function tryToSendDM(
         console.log(`  - data-e2e attributes found:`, messageButtonCheck.diagnostics.dataE2EAttributes);
         console.log(`  - Links with "message":`, messageButtonCheck.diagnostics.messageLinks);
       }
+      
+      // Remove navigation listener before returning
+      page.removeAllListeners('framenavigated');
+      
       return { success: false, error: 'Message button not found - user may have DMs disabled' };
     }
     
-    if (messageButtonCheck.disabled) {
-      console.log(`[Engagement] ❌ Step 3/5 FAILED: Message button is disabled`);
-      return { success: false, error: 'Message button is disabled' };
-    }
-    
+    // NOTE: Don't check disabled state - TikTok uses aria-disabled even on clickable buttons
+    // Just attempt to click it
     console.log(`[Engagement] ✅ Step 3/5: Message button found (${messageButtonCheck.foundViaText ? 'via text match' : 'via data-e2e'})`);
     
-    // Step 3: Click the message button (wrapped in <a> tag that navigates)
+    if (messageButtonCheck.disabled) {
+      console.log(`[Engagement] ⚠️ Button has disabled attribute, but attempting to click anyway...`);
+    }
+    
+    // Step 4: Click the message button (wrapped in <a> tag that navigates)
     console.log(`[Engagement] 🔍 Step 4/5: Clicking Message button (will navigate to /messages page)...`);
     
     // The button is wrapped in an <a> tag that navigates to /messages?u=...
     // So we need to wait for navigation
     const navigationPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {
-      console.log(`[Engagement] No navigation detected, button might open inline compose box`);
+      console.log(`[Engagement] ⚠️ No navigation detected after 10s, button might open inline compose box`);
     });
     
-    await page.evaluate(() => {
+    const clickResult = await page.evaluate(() => {
       const btn = document.querySelector('[data-e2e="message-button"]') as HTMLElement;
       if (btn) {
+        console.log('[Browser] Found button via data-e2e, clicking...');
         btn.click();
-        return;
+        return { method: 'data-e2e', clicked: true };
       }
       
       // Fallback: click the parent <a> tag
       const messageLink = document.querySelector('a[href*="/messages"]') as HTMLElement;
       if (messageLink) {
+        console.log('[Browser] Found <a> tag with /messages, clicking...');
         messageLink.click();
-        return;
+        return { method: 'link', clicked: true };
       }
       
       // Fallback: find by text
       const allButtons = Array.from(document.querySelectorAll('button'));
       const messageBtn = allButtons.find(b => b.textContent?.toLowerCase().includes('message'));
       if (messageBtn) {
+        console.log('[Browser] Found button via text search, clicking...');
         (messageBtn as HTMLElement).click();
+        return { method: 'text', clicked: true };
       }
+      
+      return { method: 'none', clicked: false };
     });
+    
+    console.log(`[Engagement] Click result:`, clickResult);
+    
+    if (!clickResult.clicked) {
+      console.log(`[Engagement] ❌ Failed to click Message button - element not found`);
+      page.removeAllListeners('framenavigated');
+      return { success: false, error: 'Could not find Message button to click' };
+    }
     
     // Wait for navigation to complete
     await navigationPromise;
-    await new Promise(resolve => setTimeout(resolve, 3000));
     
-    console.log(`[Engagement] ✅ Step 4/5: Message button clicked, current URL: ${page.url()}`);
+    console.log(`[Engagement] ✅ Step 4/5: Message button clicked (${clickResult.method}), current URL: ${page.url()}`);
     
-    // Step 4: Check if DM input area appeared (on /messages page)
-    console.log(`[Engagement] 🔍 Step 5/5: Checking if DM compose box appeared on messages page...`);
+    // Step 5: Wait for DM compose input to load (critical for popup Chrome)
+    console.log(`[Engagement] 🔍 Step 5/5: Waiting for DM compose box to load...`);
+    
+    try {
+      // Wait for the DM input area to actually render
+      await page.waitForSelector('.public-DraftEditor-content[contenteditable="true"], [contenteditable="true"]', {
+        timeout: 10000,
+        visible: true
+      });
+      console.log(`[Engagement] ✅ DM compose box loaded!`);
+    } catch (waitError) {
+      console.log(`[Engagement] ⚠️ Timeout waiting for DM compose box (10s)`);
+      console.log(`[Engagement] Current URL: ${page.url()}`);
+      
+      // Still check what's on the page for diagnostics
+      const dmBoxCheck = await page.evaluate(() => {
+        const inputArea = document.querySelector('[data-e2e="message-input-area"]');
+        const contentEditable = document.querySelector('[data-e2e="message-input-area"] [contenteditable="true"]');
+        const draftEditorContent = document.querySelector('.public-DraftEditor-content[contenteditable="true"]');
+        const allContentEditables = Array.from(document.querySelectorAll('[contenteditable="true"]'));
+        
+        return {
+          inputAreaFound: !!inputArea,
+          contentEditableFound: !!contentEditable,
+          draftEditorContentFound: !!draftEditorContent,
+          totalContentEditables: allContentEditables.length
+        };
+      });
+      
+      console.log(`[Engagement] DM compose box diagnostic:`, dmBoxCheck);
+      
+      // Remove navigation listener before returning
+      page.removeAllListeners('framenavigated');
+      
+      return { success: false, error: 'DM compose box did not load - DMs may be blocked' };
+    }
+    
+    // Double-check that we found the right elements
     const dmBoxCheck = await page.evaluate(() => {
       const inputArea = document.querySelector('[data-e2e="message-input-area"]');
       const contentEditable = document.querySelector('[data-e2e="message-input-area"] [contenteditable="true"]');
@@ -233,80 +302,93 @@ export async function tryToSendDM(
       };
     });
     
-    console.log(`[Engagement] DM compose box check result:`, dmBoxCheck);
+    console.log(`[Engagement] DM compose box verification:`, dmBoxCheck);
     
-    if (!dmBoxCheck.bothFound) {
-      if (!dmBoxCheck.inputAreaFound) {
-        console.log(`[Engagement] ❌ Step 5/5 FAILED: [data-e2e="message-input-area"] not found`);
-      }
-      if (!dmBoxCheck.contentEditableFound && !dmBoxCheck.draftEditorContentFound) {
-        console.log(`[Engagement] ❌ Step 5/5 FAILED: contenteditable div not found (neither inside message-input-area nor as .public-DraftEditor-content)`);
-      }
-      console.log(`[Engagement] Note: Found ${dmBoxCheck.totalContentEditables} total contenteditable elements on page`);
-      console.log(`[Engagement] Current URL: ${page.url()}`);
-      return { success: false, error: 'DM compose box did not appear - DMs may be blocked' };
-    }
+    // Now we're confident the compose box is loaded, proceed with typing
+    console.log(`[Engagement] ✅ Step 5/5: DM compose box verified! Now typing message...`);
     
-    console.log(`[Engagement] ✅ Step 5/5: DM compose box found! Now typing message...`);
+    // CRITICAL: Draft.js requires actual typing simulation, not just setting innerText
+    // First, click the input to focus it
+    await page.click('.public-DraftEditor-content[contenteditable="true"]');
+    console.log(`[Engagement] Clicked DM input to focus...`);
     
-    // Type the message into the Draft.js contenteditable div
-    await page.evaluate((msg) => {
-      // Try to find the contenteditable inside message-input-area first
-      let contentEditable = document.querySelector('[data-e2e="message-input-area"] [contenteditable="true"]') as HTMLElement;
-      
-      // Fallback: find the Draft.js editor directly
-      if (!contentEditable) {
-        contentEditable = document.querySelector('.public-DraftEditor-content[contenteditable="true"]') as HTMLElement;
-      }
-      
-      if (contentEditable) {
-        // Clear any existing content
-        contentEditable.innerText = '';
-        
-        // Set the message
-        contentEditable.innerText = msg;
-        
-        // Trigger input event to update Draft.js state
-        contentEditable.dispatchEvent(new Event('input', { bubbles: true }));
-        contentEditable.dispatchEvent(new Event('change', { bubbles: true }));
-        
-        // Focus the element to ensure it's active
-        contentEditable.focus();
-      }
-    }, message);
+    await new Promise(resolve => setTimeout(resolve, 500));
     
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    
-    // Click send button (usually appears after typing)
-    const sendClicked = await page.evaluate(() => {
-      const sendSelectors = [
-        '[data-e2e="message-send-button"]',
-        '[data-e2e="message-input-area"] button[type="submit"]',
-        '[data-e2e="message-input-area"] ~ button',
-        'button[aria-label*="Send"]'
-      ];
-      
-      for (const selector of sendSelectors) {
-        const btn = document.querySelector(selector) as HTMLElement;
-        if (btn && !btn.hasAttribute('disabled') && !btn.hasAttribute('aria-disabled')) {
-          btn.click();
-          return true;
-        }
-      }
-      return false;
+    // Use page.type() to simulate real keyboard input (Draft.js will recognize this)
+    console.log(`[Engagement] Typing message (${message.length} characters)...`);
+    await page.type('.public-DraftEditor-content[contenteditable="true"]', message, {
+      delay: 10 // Small delay between keystrokes to simulate human typing
     });
     
-    if (!sendClicked) {
-      return { success: false, error: 'Send button not found or disabled' };
+    console.log(`[Engagement] ✅ Message typed successfully!`);
+    
+    console.log(`[Engagement] Message typed, waiting for Send button to appear...`);
+    
+    // CRITICAL: Send button only appears AFTER text is entered
+    try {
+      await page.waitForSelector('[data-e2e="message-send"]', {
+        timeout: 5000,
+        visible: true
+      });
+      console.log(`[Engagement] ✅ Send button appeared!`);
+    } catch (waitError) {
+      console.log(`[Engagement] ⚠️ Send button did not appear after typing`);
+      
+      // Remove navigation listener before returning
+      page.removeAllListeners('framenavigated');
+      
+      return { success: false, error: 'Send button did not appear after typing message' };
     }
     
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // Click send button (it's an SVG, use page.click() not evaluate)
+    console.log(`[Engagement] Clicking Send button...`);
+    try {
+      await page.click('[data-e2e="message-send"]');
+      console.log(`[Engagement] ✅ Send button clicked!`);
+    } catch (clickError) {
+      console.log(`[Engagement] ❌ Failed to click Send button:`, clickError);
+      
+      // Remove navigation listener before returning
+      page.removeAllListeners('framenavigated');
+      
+      return { success: false, error: 'Failed to click Send button' };
+    }
+    
+    // Check if message failed to send (failure icon appears within 2 seconds)
+    console.log(`[Engagement] Checking if message sent successfully...`);
+    try {
+      await page.waitForSelector('.css-1ngp6v6-7937d88b--StyledIconFail', {
+        timeout: 2000,
+        visible: true
+      });
+      
+      // Failure icon appeared - message didn't send (privacy settings, etc)
+      console.log(`[Engagement] ❌ DM failed to send - failure icon detected (user may have privacy settings blocking DMs)`);
+      
+      // Remove navigation listener before returning
+      page.removeAllListeners('framenavigated');
+      
+      return { success: false, error: 'Message failed to send - user privacy settings may block DMs' };
+    } catch (timeoutError) {
+      // Timeout means no failure icon appeared - message sent successfully!
+      console.log(`[Engagement] ✅ No failure icon detected - DM sent successfully to @${username}`);
+    }
+    
+    await new Promise(resolve => setTimeout(resolve, 1000));
     
     console.log(`[Engagement] ✅ DM sent to @${username}`);
+    
+    // Remove navigation listener before returning
+    page.removeAllListeners('framenavigated');
+    
     return { success: true };
     
   } catch (error) {
     console.error(`[Engagement] Error sending DM to @${username}:`, error);
+    
+    // Remove navigation listener before returning
+    page.removeAllListeners('framenavigated');
+    
     return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
   }
 }
@@ -320,15 +402,56 @@ export async function postCommentReply(
   commentText: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    console.log(`[Engagement] Posting comment on video: ${videoUrl}`);
+    console.log(`[Engagement] 📝 postCommentReply() called for video: ${videoUrl}`);
     
-    // Should already be on the video page, but navigate if needed
-    if (!page.url().includes(videoUrl)) {
-      await page.goto(videoUrl, {
-        waitUntil: 'networkidle2',
-        timeout: 15000
-      });
-      await new Promise(resolve => setTimeout(resolve, 2000));
+    // CRITICAL: Check current URL and navigate if needed
+    const currentUrl = page.url();
+    console.log(`[Engagement] 🔍 Current URL before navigation check: ${currentUrl}`);
+    console.log(`[Engagement] 🎯 Target video URL: ${videoUrl}`);
+    
+    // Check if we're on a video page (ANY video page)
+    if (!currentUrl.includes('/video/')) {
+      console.log(`[Engagement] ⚠️ NOT on video page! Current page: ${currentUrl}`);
+      console.log(`[Engagement] 🚀 Navigating back to video: ${videoUrl}`);
+      
+      try {
+        await page.goto(videoUrl, {
+          waitUntil: 'networkidle2',
+          timeout: 15000
+        });
+        console.log(`[Engagement] ✅ Navigation completed (URL changed)`);
+        
+        // CRITICAL: Wait for actual video content to render (not just URL change)
+        console.log(`[Engagement] ⏳ Waiting for video page content to render...`);
+        await page.waitForSelector('[data-e2e="browse-video"], [data-e2e="comment-level-1"], video', {
+          timeout: 10000
+        });
+        console.log(`[Engagement] ✅ Video content detected!`);
+        
+        const afterNavUrl = page.url();
+        console.log(`[Engagement] 🔍 URL after navigation: ${afterNavUrl}`);
+      } catch (navError) {
+        console.error(`[Engagement] ❌ Navigation or content loading failed:`, navError);
+        return { success: false, error: 'Failed to load video page content' };
+      }
+    } else {
+      console.log(`[Engagement] ✅ Already on video page, no navigation needed`);
+    }
+    
+    // Verify we actually have video content (not inbox)
+    const pageCheck = await page.evaluate(() => {
+      return {
+        hasComments: document.querySelectorAll('[data-e2e="comment-level-1"]').length > 0,
+        hasInbox: document.querySelectorAll('[data-e2e="inbox-bar"]').length > 0,
+        url: window.location.href
+      };
+    });
+    
+    console.log(`[Engagement] 🔍 Page content check:`, pageCheck);
+    
+    if (pageCheck.hasInbox && !pageCheck.hasComments) {
+      console.log(`[Engagement] ❌ Still on inbox page after navigation! Actual URL: ${pageCheck.url}`);
+      return { success: false, error: 'Page stuck on inbox after navigation' };
     }
     
     // Method 1: Try to click Reply button on the first comment (more natural for engagement)
