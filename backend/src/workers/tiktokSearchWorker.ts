@@ -566,10 +566,27 @@ export async function searchTikTokByKeywords(
               
               const comments = commentElements.map(el => {
                 try {
-                  // Username: look for data-e2e starts with "comment-username" (has number suffix)
+                  // Username: Extract actual username from href, not display name (which may have emojis)
                   const usernameContainer = el.closest('[class*="DivCommentItemWrapper"]')?.querySelector('[data-e2e^="comment-username"]');
-                  const commentUsername = (usernameContainer?.querySelector('a p') || 
-                                          usernameContainer?.querySelector('p'))?.textContent?.trim().replace('@', '') || '';
+                  const usernameLink = usernameContainer?.querySelector('a');
+                  
+                  let commentUsername = '';
+                  if (usernameLink) {
+                    // Extract username from href like "/@username" or "/user/username"
+                    const href = usernameLink.getAttribute('href');
+                    if (href) {
+                      const match = href.match(/\/@([^/?]+)/); // Match /@username
+                      if (match) {
+                        commentUsername = match[1]; // Get username without @
+                      }
+                    }
+                  }
+                  
+                  // Fallback to text content if href extraction failed
+                  if (!commentUsername) {
+                    commentUsername = (usernameContainer?.querySelector('a p') || 
+                                      usernameContainer?.querySelector('p'))?.textContent?.trim().replace('@', '') || '';
+                  }
                   
                   // Comment text: it's a child span of the comment-level-1 element
                   const commentText = (el.querySelector('span.TUXText') || 
@@ -682,10 +699,9 @@ export async function searchTikTokByKeywords(
                       url: `https://www.tiktok.com/@${result.username}`
                     });
                     
-                    // Announce engagement attempt
                     sendUserEvent(userId, {
-                      type: 'info',
-                      text: `📤 Sending DM to @${result.username}...`
+                      type: 'success',
+                      text: `✅ Buying intent found`
                     });
                     
                     const engagementResult = await engageWithUser(
@@ -702,43 +718,41 @@ export async function searchTikTokByKeywords(
                     if (engagementResult.success) {
                       if (engagementResult.method === 'dm') {
                         sendUserEvent(userId, {
-                          type: 'success',
-                          text: `✅ Successfully sent DM!`
+                          type: 'info',
+                          text: `✉️ Sending DM`
                         });
-                        // Show the DM text
                         sendUserEvent(userId, {
                           type: 'info',
-                          text: `📩 "${result.customizedDM}"`
+                          text: `"${result.customizedDM}"`
+                        });
+                        sendUserEvent(userId, {
+                          type: 'success',
+                          text: `✅ DM sent successfully!`
                         });
                       } else if (engagementResult.method === 'comment') {
                         sendUserEvent(userId, {
+                          type: 'warning',
+                          text: `⚠️ DM failed, posting comment reply...`
+                        });
+                        sendUserEvent(userId, {
                           type: 'info',
-                          text: `❌ Failed to send DM. Leaving reply to comment...`
+                          text: `"${result.customizedReply}"`
                         });
                         sendUserEvent(userId, {
                           type: 'success',
-                          text: `✅ Reply successfully posted!`
-                        });
-                        // Show the comment text
-                        sendUserEvent(userId, {
-                          type: 'info',
-                          text: `💬 "${result.customizedReply}"`
+                          text: `✅ Comment reply posted successfully!`
                         });
                       }
                     } else if (engagementResult.method === 'skipped') {
                       sendUserEvent(userId, {
-                        type: 'info',
-                        text: `⏭️ Skipped @${result.username} - already contacted`
+                        type: 'success',
+                        text: `✔️ Already contacted`
                       });
                     } else {
                       // Both DM and comment failed
                       sendUserEvent(userId, {
-                        type: 'info',
-                        text: `❌ Failed to send DM. Leaving reply to comment...`
-                      });
-                      sendUserEvent(userId, {
                         type: 'error',
-                        text: `❌ Failed to post reply: ${engagementResult.error}`
+                        text: `❌ Failed to engage: ${engagementResult.error}`
                       });
                     }
                     

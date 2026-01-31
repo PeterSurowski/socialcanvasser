@@ -33,7 +33,7 @@ export default function SidebarFeed() {
     <div className="w-80 bg-white border-l p-4 overflow-y-auto">
       <h3 className="font-semibold mb-4 text-lg">Live Feed</h3>
       <div className="space-y-4">
-        {events.map(ev => {
+        {events.filter(ev => ev.text && ev.text.trim()).map(ev => {
           // Post header - larger, bold
           if (ev.type === 'post-header') {
             return (
