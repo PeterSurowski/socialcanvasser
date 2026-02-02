@@ -740,15 +740,30 @@ export async function postCommentReply(
     
     // Find the specific comment from targetUsername
     const targetCommentIndex = await page.evaluate((username) => {
-      const comments = Array.from(document.querySelectorAll('[data-e2e="comment-level-1"]'));
+      // CRITICAL: [data-e2e="comment-level-1"] is a SPAN with just the comment text
+      // We need the parent DIV that contains the full comment structure (username link + text + actions)
+      const commentTextSpans = Array.from(document.querySelectorAll('[data-e2e="comment-level-1"]'));
+      
+      // Navigate up to find the DivCommentContentWrapper container
+      const comments = commentTextSpans.map(span => {
+        // Go up to parent DIV (usually DivCommentContentWrapper)
+        let container = span.parentElement;
+        // Look for a DIV with "Comment" in the class name
+        while (container && (!container.className || !container.className.includes('Comment'))) {
+          container = container.parentElement;
+        }
+        return container || span.parentElement;
+      }).filter(el => el !== null);
       
       console.log(`[Browser] Searching ${comments.length} comments for @${username}...`);
-      
+      console.log(`[Browser] Comment container class names:`, comments.slice(0, 2).map(c => c?.className?.substring(0, 50)).join(' | '));
+
       const foundUsernames: string[] = []; // Track all found usernames for debugging
       
       // Find the comment from this specific user
       for (let i = 0; i < comments.length; i++) {
         const comment = comments[i];
+        if (!comment) continue;
         
         // Try multiple methods to find the username
         let commentUsername = '';
@@ -767,7 +782,7 @@ export async function postCommentReply(
         
         // Method 2: Look for username in data-e2e="comment-username-*" wrapper (alternative)
         if (!commentUsername) {
-          const usernameWrapper = comment.querySelector('[data-e2e^="comment-username"]');
+          const usernameWrapper = comment.querySelector('[data-e2e="comment-username-1"]');
           if (usernameWrapper) {
             const link = usernameWrapper.querySelector('a[href*="/@"]');
             if (link) {
