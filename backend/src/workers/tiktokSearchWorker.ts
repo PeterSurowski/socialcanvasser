@@ -127,6 +127,9 @@ export async function searchTikTokByKeywords(
   const connection = await db.getConnection();
   
   try {
+    // PHASE 3: Track current account (may change during rotation)
+    let currentAccountId = accountId;
+    
     // Get account session info
     const [rows] = await connection.query(
       'SELECT session_data FROM tiktok_accounts WHERE id = ? AND is_active = 1 LIMIT 1',
@@ -965,15 +968,103 @@ export async function searchTikTokByKeywords(
                       text: `✅ Buying intent found`
                     });
                     
-                    const engagementResult = await engageWithUser(
+                    // PHASE 3: Engagement with account rotation
+                    let engagementResult = await engageWithUser(
                       page,
                       userId,
-                      accountId,
+                      currentAccountId,
                       result.username,
                       videoData.post.videoUrl,
                       result.customizedDM,
                       result.customizedReply
                     );
+                    
+                    // PHASE 3: Check for rate limit detection
+                    if (!engagementResult.success && (engagementResult as any).rateLimitDetected) {
+                      console.log(`[Account Rotation] 🚫 RATE LIMIT DETECTED for account ${currentAccountId}`);
+                      
+                      // Snooze this account
+                      await snoozeAccount(currentAccountId, userId);
+                      
+                      // Try to switch to next available account
+                      const nextAccount = await getNextAvailableAccount(userId, currentAccountId);
+                      
+                      if (nextAccount) {
+                        console.log(`[Account Rotation] 🔄 Switching to account ${nextAccount.id} (@${nextAccount.account_identifier})`);
+                        
+                        sendUserEvent(userId, {
+                          type: 'info',
+                          text: `🔄 Switching to account @${nextAccount.account_identifier}`
+                        });
+                        
+                        // Get or create context for new account
+                        const newCtx = await getBrowserContextForAccount(nextAccount);
+                        page = newCtx.page;
+                        currentAccountId = nextAccount.id;
+                        currentAccount = nextAccount;
+                        
+                        // Reset action counter for new account
+                        await resetActionCounter(currentAccountId);
+                        
+                        // Retry engagement with new account
+                        console.log(`[Account Rotation] 🔁 Retrying engagement with new account...`);
+                        engagementResult = await engageWithUser(
+                          page,
+                          userId,
+                          currentAccountId,
+                          result.username,
+                          videoData.post.videoUrl,
+                          result.customizedDM,
+                          result.customizedReply
+                        );
+                      } else {
+                        console.log(`[Account Rotation] ❌ No more available accounts - all snoozed`);
+                        sendUserEvent(userId, {
+                          type: 'error',
+                          text: `❌ All accounts rate limited - pausing automation`
+                        });
+                        // Exit the search loop
+                        return;
+                      }
+                    }
+                    
+                    // PHASE 3: Increment action counter if engagement succeeded
+                    if (engagementResult.success) {
+                      const rotationCheck = await incrementActionCounter(currentAccountId);
+                      
+                      console.log(`[Account Rotation] 📊 Actions: ${rotationCheck.currentActions}/${rotationCheck.limit}`);
+                      
+                      // Check if we need to rotate accounts
+                      if (rotationCheck.shouldRotate) {
+                        const nextAccount = await getNextAvailableAccount(userId, currentAccountId);
+                        
+                        if (nextAccount) {
+                          console.log(`[Account Rotation] 🔄 Action limit reached, switching to account ${nextAccount.id} (@${nextAccount.account_identifier})`);
+                          
+                          sendUserEvent(userId, {
+                            type: 'info',
+                            text: `🔄 Switching to account @${nextAccount.account_identifier} (${rotationCheck.currentActions} actions completed)`
+                          });
+                          
+                          // Get or create context for new account
+                          const newCtx = await getBrowserContextForAccount(nextAccount);
+                          page = newCtx.page;
+                          currentAccountId = nextAccount.id;
+                          currentAccount = nextAccount;
+                          
+                          // Reset action counter for new account
+                          await resetActionCounter(currentAccountId);
+                        } else {
+                          console.log(`[Account Rotation] ⚠️ No more available accounts for rotation - all snoozed`);
+                          sendUserEvent(userId, {
+                            type: 'warning',
+                            text: `⚠️ All accounts exhausted - pausing automation`
+                          });
+                          // Exit the search loop
+                          return;
+                        }
+                      }
+                    }
                     
                     // Send live feed notification based on result
                     if (engagementResult.success) {
@@ -1079,7 +1170,134 @@ export async function searchTikTokByKeywords(
 }
 
 /**
+ * PHASE 3: Get next available (non-snoozed) account for rotation
+ */
+async function getNextAvailableAccount(userId: number, currentAccountId: number): Promise<any | null> {
+  const connection = await db.getConnection();
+  try {
+    // Query for next available account:
+    // 1. Belongs to this user
+    // 2. Is active
+    // 3. NOT rate limited OR rate limit has expired
+    // 4. Preferably a different account than current (for rotation)
+    const [accounts] = await connection.query(
+      `SELECT id, account_identifier, session_data, actions_per_session, current_session_actions, 
+              is_rate_limited, rate_limit_expires_at, last_keyword_index
+       FROM tiktok_accounts 
+       WHERE user_id = ? 
+         AND is_active = 1 
+         AND (is_rate_limited = FALSE OR rate_limit_expires_at IS NULL OR rate_limit_expires_at < NOW())
+       ORDER BY 
+         CASE WHEN id = ? THEN 1 ELSE 0 END,  -- Prefer different account
+         last_used_at ASC,  -- Least recently used first
+         id ASC
+       LIMIT 1`,
+      [userId, currentAccountId]
+    );
+    
+    if (!accounts || (accounts as any[]).length === 0) {
+      console.log(`[Account Rotation] ⚠️ No available accounts for user ${userId} - all may be snoozed`);
+      return null;
+    }
+    
+    const account = (accounts as any[])[0];
+    console.log(`[Account Rotation] ✅ Selected account ${account.id} (@${account.account_identifier})`);
+    
+    // Update last_used_at timestamp
+    await connection.query(
+      'UPDATE tiktok_accounts SET last_used_at = NOW() WHERE id = ?',
+      [account.id]
+    );
+    
+    return account;
+  } finally {
+    connection.release();
+  }
+}
+
+/**
+ * PHASE 3: Snooze an account for 24.5 hours due to rate limiting
+ */
+async function snoozeAccount(accountId: number, userId: number): Promise<void> {
+  const connection = await db.getConnection();
+  try {
+    // Calculate 24.5 hours from now
+    await connection.query(
+      `UPDATE tiktok_accounts 
+       SET is_rate_limited = TRUE,
+           rate_limit_detected_at = NOW(),
+           rate_limit_expires_at = DATE_ADD(NOW(), INTERVAL 24.5 HOUR),
+           current_session_actions = 0
+       WHERE id = ?`,
+      [accountId]
+    );
+    
+    console.log(`[Account Rotation] 😴 Account ${accountId} snoozed for 24.5 hours due to rate limit`);
+    
+    // Notify user
+    sendUserEvent(userId, {
+      type: 'warning',
+      text: `⚠️ Account rate limited - snoozed for 24.5 hours`
+    });
+  } finally {
+    connection.release();
+  }
+}
+
+/**
+ * PHASE 3: Increment action counter and check if rotation needed
+ */
+async function incrementActionCounter(accountId: number): Promise<{ shouldRotate: boolean; currentActions: number; limit: number }> {
+  const connection = await db.getConnection();
+  try {
+    // Increment current_session_actions
+    await connection.query(
+      'UPDATE tiktok_accounts SET current_session_actions = current_session_actions + 1 WHERE id = ?',
+      [accountId]
+    );
+    
+    // Get updated values
+    const [rows] = await connection.query(
+      'SELECT current_session_actions, actions_per_session FROM tiktok_accounts WHERE id = ?',
+      [accountId]
+    );
+    
+    const account = (rows as any[])[0];
+    const shouldRotate = account.current_session_actions >= account.actions_per_session;
+    
+    if (shouldRotate) {
+      console.log(`[Account Rotation] 🔄 Action limit reached (${account.current_session_actions}/${account.actions_per_session}) - rotation needed`);
+    }
+    
+    return {
+      shouldRotate,
+      currentActions: account.current_session_actions,
+      limit: account.actions_per_session
+    };
+  } finally {
+    connection.release();
+  }
+}
+
+/**
+ * PHASE 3: Reset action counter when rotating to new account
+ */
+async function resetActionCounter(accountId: number): Promise<void> {
+  const connection = await db.getConnection();
+  try {
+    await connection.query(
+      'UPDATE tiktok_accounts SET current_session_actions = 0 WHERE id = ?',
+      [accountId]
+    );
+    console.log(`[Account Rotation] 🔄 Action counter reset for account ${accountId}`);
+  } finally {
+    connection.release();
+  }
+}
+
+/**
  * Run TikTok search for a specific user's accounts
+ * PHASE 3: Multi-context worker with account rotation
  */
 export async function runTikTokSearchForAccounts(userId: number) {
   const connection = await db.getConnection();
@@ -1087,14 +1305,43 @@ export async function runTikTokSearchForAccounts(userId: number) {
   try {
     console.log(`[TikTok Search Worker] Starting search for user ${userId} accounts...`);
     
-    // Get user's active TikTok accounts with their last keyword index
+    // Get user's active TikTok accounts (including rate limit status)
     const [accounts] = await connection.query(
-      'SELECT id, last_keyword_index FROM tiktok_accounts WHERE user_id = ? AND is_active = 1',
+      `SELECT id, account_identifier, session_data, actions_per_session, current_session_actions,
+              is_rate_limited, rate_limit_expires_at, last_keyword_index
+       FROM tiktok_accounts 
+       WHERE user_id = ? AND is_active = 1`,
       [userId]
     );
     
     if (!accounts || (accounts as any[]).length === 0) {
       console.log('[TikTok Search Worker] No active accounts found');
+      return;
+    }
+    
+    const allAccounts = accounts as any[];
+    console.log(`[TikTok Search Worker] Found ${allAccounts.length} total accounts`);
+    
+    // Check how many are snoozed
+    const snoozedAccounts = allAccounts.filter(acc => 
+      acc.is_rate_limited && acc.rate_limit_expires_at && new Date(acc.rate_limit_expires_at) > new Date()
+    );
+    const availableAccounts = allAccounts.length - snoozedAccounts.length;
+    
+    if (snoozedAccounts.length > 0) {
+      console.log(`[TikTok Search Worker] ⚠️ ${snoozedAccounts.length} account(s) currently snoozed (rate limited)`);
+      sendUserEvent(userId, {
+        type: 'warning',
+        text: `${snoozedAccounts.length} account(s) snoozed - using ${availableAccounts} available account(s)`
+      });
+    }
+    
+    if (availableAccounts === 0) {
+      console.log('[TikTok Search Worker] ⚠️ All accounts are snoozed - cannot proceed');
+      sendUserEvent(userId, {
+        type: 'error',
+        text: `❌ All accounts are rate limited. Please wait for snooze period to expire.`
+      });
       return;
     }
     
@@ -1126,186 +1373,261 @@ export async function runTikTokSearchForAccounts(userId: number) {
       openaiApiKey: configData.openai_api_key
     };
     
-    if (keywords.length === 0) {
-      console.log('[TikTok Search Worker] No valid keywords found');
+    console.log(`[TikTok Search Worker] Keywords configured: ${keywords.join(', ')}`);
+    console.log(`[TikTok Search Worker] PHASE 3: Multi-account rotation enabled`);
+    
+    // PHASE 3: Start with first available account
+    let currentAccount = await getNextAvailableAccount(userId, -1);
+    
+    if (!currentAccount) {
+      console.log('[TikTok Search Worker] No available accounts to start with');
       return;
     }
     
-    console.log(`[TikTok Search Worker] Keywords configured: ${keywords.join(', ')}`);
-    console.log(`[TikTok Search Worker] Will search ONE keyword per account to avoid bot detection`);
+    console.log(`[TikTok Search Worker] Starting with account ${currentAccount.id} (@${currentAccount.account_identifier})`);
+    console.log(`[TikTok Search Worker] Action limit: ${currentAccount.actions_per_session} actions per session`);
     
-    // Search for each account (ONE keyword each)
-    for (const account of accounts as any[]) {
-      try {
-        const keywordIndex = account.last_keyword_index || 0;
-        const keyword = keywords[keywordIndex];
+    // Create browser contexts for multi-account support
+    // Note: We'll connect to the shared Chrome instance and create contexts as needed
+    let browser: any = null;
+    const contextMap = new Map<number, { context: any; page: any }>();
+    
+    try {
+      // Connect to shared Chrome instance
+      browser = await puppeteer.connect({
+        browserURL: 'http://127.0.0.1:9222',
+        protocolTimeout: 120000
+      });
+      
+      console.log(`[TikTok Search Worker] Connected to Chrome, creating browser context for account ${currentAccount.id}...`);
+      
+      // PHASE 3: Function to get or create browser context for an account
+      const getBrowserContextForAccount = async (account: any) => {
+        if (contextMap.has(account.id)) {
+          console.log(`[Account Rotation] ♻️ Reusing existing context for account ${account.id}`);
+          return contextMap.get(account.id)!;
+        }
         
-        // Send live feed event: searching
-        sendUserEvent(userId, { 
-          type: 'info', 
-          text: `Searching for "${keyword}"...` 
+        console.log(`[Account Rotation] 🆕 Creating new browser context for account ${account.id}...`);
+        
+        // Create isolated browser context (separate cookies, cache, etc.)
+        const context = await browser.createBrowserContext();
+        const page = await context.newPage();
+        
+        // Load account-specific cookies
+        if (account.session_data) {
+          try {
+            const sessionData = JSON.parse(account.session_data);
+            if (sessionData.cookies && Array.isArray(sessionData.cookies)) {
+              await page.setCookie(...sessionData.cookies);
+              console.log(`[Account Rotation] 🍪 Loaded ${sessionData.cookies.length} cookies for account ${account.id}`);
+            }
+          } catch (cookieError) {
+            console.error(`[Account Rotation] ⚠️ Failed to load cookies for account ${account.id}:`, cookieError);
+          }
+        }
+        
+        const ctx = { context, page };
+        contextMap.set(account.id, ctx);
+        return ctx;
+      };
+      
+      // Get initial context
+      let { page } = await getBrowserContextForAccount(currentAccount);
+      let currentAccountId = currentAccount.id;
+      
+      // Search for ONE keyword, but use account rotation for engagements
+      const keywordIndex = currentAccount.last_keyword_index || 0;
+      const keyword = keywords[keywordIndex];
+      
+      // Send live feed event: searching
+      sendUserEvent(userId, { 
+        type: 'info', 
+        text: `Searching for "${keyword}" with @${currentAccount.account_identifier}...` 
+      });
+      
+      // NOTE: searchTikTokByKeywords will use 'page' and handle engagements with account rotation
+      // The page variable may be reassigned during engagement if rotation occurs
+      const result = await searchTikTokByKeywords(currentAccountId, keywords, keywordIndex, userId, userConfig);
+        
+      console.log(`[TikTok Search Worker] Extracted ${result.posts.length} posts, beginning database insert...`);
+      
+      // Store posts in database along with their comments
+      let storedCount = 0;
+      for (const videoData of result.posts) {
+        try {
+          const post = videoData.post;
+          console.log(`[TikTok Search Worker] Inserting: @${post.username} - ${post.videoUrl}`);
+          
+          // Insert the post
+          const [postResult] = await connection.query(
+            `INSERT INTO tiktok_posts (account_id, username, caption, video_url, likes, comments, shares, found_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+             ON DUPLICATE KEY UPDATE 
+               likes = VALUES(likes), 
+               comments = VALUES(comments),
+               id = LAST_INSERT_ID(id)`,
+            [currentAccount.id, post.username, post.caption, post.videoUrl, post.likes, post.commentsCount, post.shares]
+          );
+          
+          // Get the post ID (either newly inserted or existing)
+          const postId = (postResult as any).insertId;
+          
+          // Parse and filter comments to last 7 days
+          const oneWeekAgo = new Date();
+          oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+          
+          let recentComments = 0;
+          for (const comment of videoData.comments) {
+            // Parse relative time
+            const postedAt = parseRelativeTime(comment.relativeTime);
+            
+            // Skip if older than 7 days
+            if (postedAt && postedAt < oneWeekAgo) {
+              continue;
+            }
+            
+            // Insert comment
+            try {
+              await connection.query(
+                `INSERT INTO tiktok_comments (post_id, username, comment_text, likes, posted_at, scraped_at)
+                 VALUES (?, ?, ?, ?, ?, NOW())
+                 ON DUPLICATE KEY UPDATE likes = VALUES(likes)`,
+                [postId, comment.username, comment.text, comment.likes, postedAt || null]
+              );
+              recentComments++;
+            } catch (commentError) {
+              console.error(`[TikTok Search Worker] Failed to insert comment:`, commentError);
+            }
+          }
+          
+          console.log(`[TikTok Search Worker] Stored ${recentComments} recent comments for post ${postId}`);
+          storedCount++;
+          
+        } catch (insertError) {
+          console.error(`[TikTok Search Worker] ❌ Failed to insert post:`, insertError);
+          console.error(`[TikTok Search Worker] Post data:`, JSON.stringify(videoData, null, 2));
+        }
+      }
+      
+      console.log(`[TikTok Search Worker] ✅ Successfully stored ${storedCount}/${result.posts.length} posts with comments`);
+      
+      // Update last_keyword_index and last_search_at for rotation
+      await connection.query(
+        'UPDATE tiktok_accounts SET last_keyword_index = ?, last_search_at = NOW() WHERE id = ?',
+        [result.nextKeywordIndex, currentAccount.id]
+      );
+      
+      console.log(`[TikTok Search Worker] Next search will use keyword index ${result.nextKeywordIndex}`);
+      
+      // Send live feed events for each video with comments
+      if (result.posts.length > 0) {
+        // Deduplicate posts by URL before sending to live feed
+        const seenUrls = new Set<string>();
+        const uniquePosts = result.posts.filter((videoData) => {
+          if (seenUrls.has(videoData.post.videoUrl)) {
+            return false;
+          }
+          seenUrls.add(videoData.post.videoUrl);
+          return true;
         });
         
-        const result = await searchTikTokByKeywords(account.id, keywords, keywordIndex, userId, userConfig);
+        sendUserEvent(userId, { 
+          type: 'success', 
+          text: `Found ${uniquePosts.length} posts mentioning "${keyword}"` 
+        });
         
-        console.log(`[TikTok Search Worker] Extracted ${result.posts.length} posts, beginning database insert...`);
-        
-        // Store posts in database along with their comments
-        let storedCount = 0;
-        for (const videoData of result.posts) {
-          try {
-            const post = videoData.post;
-            console.log(`[TikTok Search Worker] Inserting: @${post.username} - ${post.videoUrl}`);
-            
-            // Insert the post
-            const [postResult] = await connection.query(
-              `INSERT INTO tiktok_posts (account_id, username, caption, video_url, likes, comments, shares, found_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
-               ON DUPLICATE KEY UPDATE 
-                 likes = VALUES(likes), 
-                 comments = VALUES(comments),
-                 id = LAST_INSERT_ID(id)`,
-              [account.id, post.username, post.caption, post.videoUrl, post.likes, post.commentsCount, post.shares]
-            );
-            
-            // Get the post ID (either newly inserted or existing)
-            const postId = (postResult as any).insertId;
-            
-            // Parse and filter comments to last 7 days
-            const oneWeekAgo = new Date();
-            oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-            
-            let recentComments = 0;
-            for (const comment of videoData.comments) {
-              // Parse relative time
-              const postedAt = parseRelativeTime(comment.relativeTime);
-              
-              // Skip if older than 7 days
-              if (postedAt && postedAt < oneWeekAgo) {
-                continue;
-              }
-              
-              // Insert comment
-              try {
-                await connection.query(
-                  `INSERT INTO tiktok_comments (post_id, username, comment_text, likes, posted_at, scraped_at)
-                   VALUES (?, ?, ?, ?, ?, NOW())
-                   ON DUPLICATE KEY UPDATE likes = VALUES(likes)`,
-                  [postId, comment.username, comment.text, comment.likes, postedAt || null]
-                );
-                recentComments++;
-              } catch (commentError) {
-                console.error(`[TikTok Search Worker] Failed to insert comment:`, commentError);
-              }
-            }
-            
-            console.log(`[TikTok Search Worker] Stored ${recentComments} recent comments for post ${postId}`);
-            storedCount++;
-            
-          } catch (insertError) {
-            console.error(`[TikTok Search Worker] ❌ Failed to insert post:`, insertError);
-            console.error(`[TikTok Search Worker] Post data:`, JSON.stringify(videoData, null, 2));
-          }
-        }
-        
-        console.log(`[TikTok Search Worker] ✅ Successfully stored ${storedCount}/${result.posts.length} posts with comments`);
-        
-        // Update last_keyword_index and last_search_at for rotation
-        await connection.query(
-          'UPDATE tiktok_accounts SET last_keyword_index = ?, last_search_at = NOW() WHERE id = ?',
-          [result.nextKeywordIndex, account.id]
-        );
-        
-        console.log(`[TikTok Search Worker] Next search will use keyword index ${result.nextKeywordIndex}`);
-        
-        // Send live feed events for each video with comments
-        if (result.posts.length > 0) {
-          // Deduplicate posts by URL before sending to live feed
-          const seenUrls = new Set<string>();
-          const uniquePosts = result.posts.filter((videoData) => {
-            if (seenUrls.has(videoData.post.videoUrl)) {
-              return false;
-            }
-            seenUrls.add(videoData.post.videoUrl);
-            return true;
+        // Send post header + comments in the format requested
+        // Note: Events are prepended in UI (newest first), so we need to send in reverse order
+        // We send posts in REVERSE order, and for each post: header THEN comments
+        // This way in the UI (which reverses), the FIRST post header will be at the top
+        for (let i = uniquePosts.length - 1; i >= 0; i--) {
+          const videoData = uniquePosts[i];
+          const post = videoData.post;
+          
+          // Filter to recent comments (< 7 days)
+          const oneWeekAgo = new Date();
+          oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+          
+          const recentComments = videoData.comments.filter(comment => {
+            const postedAt = parseRelativeTime(comment.relativeTime);
+            return !postedAt || postedAt >= oneWeekAgo;
           });
           
-          sendUserEvent(userId, { 
-            type: 'success', 
-            text: `Found ${uniquePosts.length} posts mentioning "${keyword}"` 
-          });
-          
-          // Send post header + comments in the format requested
-          // Note: Events are prepended in UI (newest first), so we need to send in reverse order
-          // We send posts in REVERSE order, and for each post: header THEN comments
-          // This way in the UI (which reverses), the FIRST post header will be at the top
-          for (let i = uniquePosts.length - 1; i >= 0; i--) {
-            const videoData = uniquePosts[i];
-            const post = videoData.post;
-            
-            // Filter to recent comments (< 7 days)
-            const oneWeekAgo = new Date();
-            oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-            
-            const recentComments = videoData.comments.filter(comment => {
-              const postedAt = parseRelativeTime(comment.relativeTime);
-              return !postedAt || postedAt >= oneWeekAgo;
-            });
-            
-            // Send comments in REVERSE order (FIRST)
-            for (let j = recentComments.length - 1; j >= 0; j--) {
-              const comment = recentComments[j];
-              sendUserEvent(userId, {
-                type: 'comment',
-                text: `${comment.text}\n@${comment.username}\n${comment.relativeTime}`,
-                url: `https://www.tiktok.com/@${comment.username}`
-              });
-            }
-            
-            // Send post header (LAST, so it appears first when UI reverses)
+          // Send comments in REVERSE order (FIRST)
+          for (let j = recentComments.length - 1; j >= 0; j--) {
+            const comment = recentComments[j];
             sendUserEvent(userId, {
-              type: 'post-header',
-              text: post.username,
-              url: post.videoUrl
+              type: 'comment',
+              text: `${comment.text}\n@${comment.username}\n${comment.relativeTime}`,
+              url: `https://www.tiktok.com/@${comment.username}`
             });
           }
-        }
-        
-      } catch (error) {
-        console.error(`[TikTok Search Worker] Error processing account ${account.id}:`, error);
-        
-        // Send user-friendly error messages
-        if (error instanceof Error && error.message.includes('ECONNREFUSED')) {
-          sendUserEvent(userId, { 
-            type: 'error', 
-            text: `⚠️ Chrome not running! Please run launch-chrome.bat and keep it open.` 
-          });
-        } else if (error instanceof Error && error.message.includes('not ready')) {
-          sendUserEvent(userId, { 
-            type: 'error', 
-            text: `Account not ready - please complete setup first` 
-          });
-        } else {
-          sendUserEvent(userId, { 
-            type: 'error', 
-            text: `Search failed: ${error instanceof Error ? error.message : 'Unknown error'}` 
+          
+          // Send post header (LAST, so it appears first when UI reverses)
+          sendUserEvent(userId, {
+            type: 'post-header',
+            text: post.username,
+            url: post.videoUrl
           });
         }
-        // Continue with next account
       }
+      
+      console.log('[TikTok Search Worker] Search completed');
+      
+      // Send completion message
+      sendUserEvent(userId, { 
+        type: 'info', 
+        text: '✅ Search completed' 
+      });
+      
+    } catch (error) {
+      console.error(`[TikTok Search Worker] Error during search:`, error);
+      
+      // Send user-friendly error messages
+      if (error instanceof Error && error.message.includes('ECONNREFUSED')) {
+        sendUserEvent(userId, { 
+          type: 'error', 
+          text: `⚠️ Chrome not running! Please run launch-chrome.bat and keep it open.` 
+        });
+      } else if (error instanceof Error && error.message.includes('not ready')) {
+        sendUserEvent(userId, { 
+          type: 'error', 
+          text: `Account not ready - please complete setup first` 
+        });
+      } else {
+        sendUserEvent(userId, { 
+          type: 'error', 
+          text: `Search failed: ${error instanceof Error ? error.message : 'Unknown error'}` 
+        });
+      }
+    } finally {
+      // PHASE 3: Clean up all browser contexts
+      console.log(`[TikTok Search Worker] Cleaning up ${contextMap.size} browser contexts...`);
+      for (const [accountId, ctx] of contextMap.entries()) {
+        try {
+          await ctx.context.close();
+          console.log(`[TikTok Search Worker] ✅ Closed context for account ${accountId}`);
+        } catch (closeError) {
+          console.error(`[TikTok Search Worker] ⚠️ Error closing context for account ${accountId}:`, closeError);
+        }
+      }
+      
+      // Disconnect from browser
+      if (browser) {
+        try {
+          await browser.disconnect();
+          console.log(`[TikTok Search Worker] ✅ Disconnected from Chrome`);
+        } catch (disconnectError) {
+          console.error(`[TikTok Search Worker] ⚠️ Error disconnecting from browser:`, disconnectError);
+        }
+      }
+      
+      connection.release();
     }
-    
-    console.log('[TikTok Search Worker] Search completed');
-    
-    // Send completion message
-    sendUserEvent(userId, { 
-      type: 'info', 
-      text: '✅ Search completed for all accounts' 
-    });
     
   } catch (error) {
     console.error('[TikTok Search Worker] Error:', error);
-  } finally {
     connection.release();
   }
 }

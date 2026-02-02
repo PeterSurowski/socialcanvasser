@@ -75,12 +75,13 @@ export async function logActivity(
 /**
  * Try to send a DM to a TikTok user
  * Returns true if successful, false if DM failed (user settings block DMs)
+ * Returns rateLimitDetected=true if TikTok rate limit message appears
  */
 export async function tryToSendDM(
   page: Page,
   username: string,
   message: string
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; rateLimitDetected?: boolean }> {
   try {
     console.log(`[Engagement] 🔍 Step 1/5: Attempting to DM @${username}...`);
     
@@ -107,20 +108,30 @@ export async function tryToSendDM(
     if (!afterProfileUrl.includes(`/@${username}`)) {
       console.log(`[Engagement] ⚠️ Unexpected URL after profile navigation. Expected: ${profileUrl}, Got: ${afterProfileUrl}`);
     }    
-    // Step 2: Wait for profile page content to load (either Message button or Follow button)
-    console.log(`[Engagement] 🔍 Step 3/5: Waiting for profile content to load...`);
+    // Step 2: Wait for profile page content to load - specifically the Message button
+    console.log(`[Engagement] 🔍 Step 3/5: Waiting for Message button to load...`);
     try {
-      // Wait for SPECIFIC profile buttons only - don't use generic 'button' selector
-      await page.waitForSelector('button[data-e2e="message-button"], button[data-e2e="follow-button"], [data-e2e="user-avatar"]', { 
-        timeout: 10000 
+      // CRITICAL: Wait for the Message button specifically (not just any profile element)
+      // TikTok dynamically renders buttons, so we need to wait for this exact element
+      await page.waitForSelector('[data-e2e="message-button"]', { 
+        timeout: 15000,
+        visible: true
       });
-      console.log(`[Engagement] ✅ Profile content loaded`);
+      console.log(`[Engagement] ✅ Message button found and visible`);
     } catch (waitErr) {
-      console.log(`[Engagement] ⚠️ Timeout waiting for profile buttons, continuing anyway...`);
+      console.log(`[Engagement] ⚠️ Message button not found within 15 seconds - user may have DMs disabled`);
+      
+      // Remove navigation listener before returning
+      page.removeAllListeners('framenavigated');
+      
+      return { success: false, error: 'Message button not found - user may have DMs disabled' };
     }
     
-    // Step 3: Look for the "Message" button
-    console.log(`[Engagement] 🔍 Step 3/5: Looking for Message button with selector [data-e2e="message-button"]...`);
+    // Add small delay for TikTok's dynamic rendering to complete
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Step 3: Verify the Message button is still there
+    console.log(`[Engagement] 🔍 Step 3/5: Verifying Message button with selector [data-e2e="message-button"]...`);
     
     const messageButtonCheck = await page.evaluate(() => {
       const btn = document.querySelector('[data-e2e="message-button"]');
@@ -203,31 +214,55 @@ export async function tryToSendDM(
     });
     
     const clickResult = await page.evaluate(() => {
+      // CRITICAL: Find the Message button first, then click its parent <a> tag
+      // This ensures we get the user-specific URL (/messages?u=USER_ID), not generic /messages
       const btn = document.querySelector('[data-e2e="message-button"]') as HTMLElement;
       if (btn) {
-        console.log('[Browser] Found button via data-e2e, clicking...');
-        btn.click();
-        return { method: 'data-e2e', clicked: true };
+        // Look for parent <a> tag (the actual navigation link)
+        const parentLink = btn.closest('a');
+        if (parentLink) {
+          const href = parentLink.getAttribute('href') || '';
+          console.log(`[Browser] Found Message button with parent link: ${href}`);
+          
+          // Verify it's a user-specific messages link (should contain user parameter)
+          if (href.includes('/messages') && href.includes('?')) {
+            console.log('[Browser] Clicking parent <a> tag with user-specific URL');
+            (parentLink as HTMLElement).click();
+            return { method: 'parent-link', clicked: true, href };
+          } else {
+            console.log('[Browser] Parent link does not have user parameter, clicking button directly');
+            btn.click();
+            return { method: 'button-direct', clicked: true, href };
+          }
+        } else {
+          console.log('[Browser] No parent <a> tag found, clicking button directly');
+          btn.click();
+          return { method: 'data-e2e', clicked: true, href: 'no-parent-link' };
+        }
       }
       
-      // Fallback: click the parent <a> tag
-      const messageLink = document.querySelector('a[href*="/messages"]') as HTMLElement;
-      if (messageLink) {
-        console.log('[Browser] Found <a> tag with /messages, clicking...');
-        messageLink.click();
-        return { method: 'link', clicked: true };
+      // Fallback 1: Look for any <a> tag that wraps a Message button
+      const allLinks = Array.from(document.querySelectorAll('a[href*="/messages"]'));
+      for (const link of allLinks) {
+        const buttonInside = link.querySelector('button');
+        if (buttonInside && buttonInside.textContent?.toLowerCase().includes('message')) {
+          const href = link.getAttribute('href') || '';
+          console.log(`[Browser] Found Message link via button text: ${href}`);
+          (link as HTMLElement).click();
+          return { method: 'link-with-button', clicked: true, href };
+        }
       }
       
-      // Fallback: find by text
+      // Fallback 2: Find button by text (last resort)
       const allButtons = Array.from(document.querySelectorAll('button'));
       const messageBtn = allButtons.find(b => b.textContent?.toLowerCase().includes('message'));
       if (messageBtn) {
         console.log('[Browser] Found button via text search, clicking...');
         (messageBtn as HTMLElement).click();
-        return { method: 'text', clicked: true };
+        return { method: 'text', clicked: true, href: 'button-only' };
       }
       
-      return { method: 'none', clicked: false };
+      return { method: 'none', clicked: false, href: 'not-found' };
     });
     
     console.log(`[Engagement] Click result:`, clickResult);
@@ -241,7 +276,19 @@ export async function tryToSendDM(
     // Wait for navigation to complete
     await navigationPromise;
     
-    console.log(`[Engagement] ✅ Step 4/5: Message button clicked (${clickResult.method}), current URL: ${page.url()}`);
+    const currentUrl = page.url();
+    console.log(`[Engagement] ✅ Step 4/5: Message button clicked (${clickResult.method}), current URL: ${currentUrl}`);
+    
+    // Verify we're on a user-specific messages page (not generic messages inbox)
+    if (!currentUrl.includes('?') && currentUrl.includes('/messages')) {
+      console.log(`[Engagement] ⚠️ WARNING: Landed on generic /messages page without user parameter!`);
+      console.log(`[Engagement] This means we clicked wrong element. Expected URL like: /messages?u=USER_ID`);
+      console.log(`[Engagement] Clicked element href was: ${clickResult.href}`);
+      
+      // Try to recover by navigating to user's profile and retrying
+      page.removeAllListeners('framenavigated');
+      return { success: false, error: 'Navigated to generic messages inbox instead of user conversation - Message button may have wrong link' };
+    }
     
     // Step 5: Wait for DM compose input to load (critical for popup Chrome)
     console.log(`[Engagement] 🔍 Step 5/5: Waiting for DM compose box to load...`);
@@ -434,7 +481,37 @@ export async function tryToSendDM(
       return { success: false, error: 'Message failed to send - user privacy settings may block DMs' };
     }
     
-    console.log(`[Engagement] ✅ No failure icon detected - DM sent successfully to @${username}`);
+    console.log(`[Engagement] ✅ No failure icon detected - checking for rate limit message...`);
+    
+    // PHASE 2: Check for rate limit message
+    const rateLimitDetected = await page.evaluate(() => {
+      // Search inside DivChatMain container for rate limit text
+      const chatMainContainer = document.querySelector('.css-2p0m0i-7937d88b--DivChatMain, [class*="DivChatMain"]');
+      
+      if (chatMainContainer) {
+        const containerText = chatMainContainer.textContent || '';
+        const hasRateLimitMessage = containerText.includes('You are sending messages too fast. Take a rest.');
+        
+        if (hasRateLimitMessage) {
+          console.log('[Browser] ⚠️ RATE LIMIT DETECTED: "You are sending messages too fast. Take a rest."');
+          return true;
+        }
+      }
+      
+      return false;
+    });
+    
+    if (rateLimitDetected) {
+      console.log(`[Engagement] ⚠️ RATE LIMITED - TikTok blocked message sending for @${username}`);
+      
+      // Remove navigation listener before returning
+      page.removeAllListeners('framenavigated');
+      
+      // Return special error code for rate limiting
+      return { success: false, error: 'RATE_LIMITED', rateLimitDetected: true } as any;
+    }
+    
+    console.log(`[Engagement] ✅ No rate limit detected - DM sent successfully to @${username}`);
     
     console.log(`[Engagement] ✅ DM sent to @${username}`);
     
