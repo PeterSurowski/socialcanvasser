@@ -701,8 +701,8 @@ export async function postCommentReply(
         // Use Puppeteer's trusted mouse wheel event (mouse already positioned over scrollable container)
         await page.mouse.wheel({ deltaY: 800 });
         
-        // Wait longer for TikTok's lazy loading (increased from 500ms to 1500ms)
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        // Wait 2 seconds for TikTok's lazy loading (takes about 1 second to load new comments)
+        await new Promise(resolve => setTimeout(resolve, 2000));
         
         // Count after scrolling
         loadedComments = await page.evaluate(() => {
@@ -710,18 +710,20 @@ export async function postCommentReply(
         });
         
         const increased = loadedComments > beforeCount;
-        console.log(`[Engagement] 🔄 Scroll ${scrollAttempts}: ${beforeCount} → ${loadedComments}/${scrollInfo.totalComments} comments ${increased ? '✅ (NEW!)' : '⚠️ (no change)'}`);
+        const percentage = Math.round((loadedComments / scrollInfo.totalComments) * 100);
+        console.log(`[Engagement] 🔄 Scroll ${scrollAttempts}: ${beforeCount} → ${loadedComments}/${scrollInfo.totalComments} (${percentage}%) ${increased ? '✅ (NEW!)' : '⚠️ (no change)'}`);
         
+        // Stop if we've loaded all comments
         if (loadedComments >= scrollInfo.totalComments) {
-          console.log(`[Engagement] ✅ All comments loaded!`);
+          console.log(`[Engagement] ✅ All comments loaded! (${loadedComments}/${scrollInfo.totalComments})`);
           break;
         }
         
-        // Track consecutive failures
+        // Track consecutive failures - be more patient (5 attempts instead of 3)
         if (!increased) {
           noChangeCount++;
-          if (noChangeCount >= 3) {
-            console.log(`[Engagement] ⚠️ No new comments after ${noChangeCount} scroll attempts - may have hit limit`);
+          if (noChangeCount >= 5) {
+            console.log(`[Engagement] ⚠️ No new comments after ${noChangeCount} scroll attempts - stopping at ${loadedComments}/${scrollInfo.totalComments} (${percentage}%)`);
             break;
           }
         } else {

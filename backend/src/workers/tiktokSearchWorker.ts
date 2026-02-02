@@ -572,27 +572,29 @@ export async function searchTikTokByKeywords(
                   
                   // Use trusted Puppeteer mouse wheel event
                   await page.mouse.wheel({ deltaY: 800 });
-                  await new Promise(resolve => setTimeout(resolve, 1500)); // Wait for lazy load
+                  await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2s for TikTok lazy load
                   
                   loadedComments = await page.evaluate(() => {
                     return document.querySelectorAll('[data-e2e="comment-level-1"]').length;
                   });
                   
                   const increased = loadedComments > beforeCount;
+                  const percentage = Math.round((loadedComments / scrollInfo.totalComments) * 100);
+                  
                   if (scrollAttempts % 5 === 0 || increased) {
-                    console.log(`[TikTok Search] 📊 Scroll ${scrollAttempts}: ${beforeCount} → ${loadedComments}/${scrollInfo.totalComments} comments ${increased ? '✅' : '⚠️'}`);
+                    console.log(`[TikTok Search] 📊 Scroll ${scrollAttempts}: ${beforeCount} → ${loadedComments}/${scrollInfo.totalComments} (${percentage}%) ${increased ? '✅' : '⚠️'}`);
                   }
                   
                   if (loadedComments >= scrollInfo.totalComments) {
-                    console.log(`[TikTok Search] ✅ All comments loaded!`);
+                    console.log(`[TikTok Search] ✅ All comments loaded! (${loadedComments}/${scrollInfo.totalComments})`);
                     break;
                   }
                   
-                  // Stop if no progress after 3 consecutive attempts
+                  // Stop if no progress after 5 consecutive attempts (more patient)
                   if (!increased) {
                     noChangeCount++;
-                    if (noChangeCount >= 3) {
-                      console.log(`[TikTok Search] ⚠️ No new comments after ${noChangeCount} attempts`);
+                    if (noChangeCount >= 5) {
+                      console.log(`[TikTok Search] ⚠️ No new comments after ${noChangeCount} attempts - stopping at ${percentage}%`);
                       break;
                     }
                   } else {
