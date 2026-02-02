@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import DashboardControls from '../components/DashboardControls'
 import SidebarFeed from '../components/SidebarFeed'
+import Settings from '../components/Settings'
 
 interface Account {
   id: number;
@@ -14,6 +15,7 @@ export default function Dashboard() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [needsSetup, setNeedsSetup] = useState<Account[]>([])
   const [showSetupModal, setShowSetupModal] = useState(false)
+  const [activeTab, setActiveTab] = useState<'overview' | 'settings'>('overview')
 
   const fetchAccounts = async () => {
     const token = localStorage.getItem('token')
@@ -73,43 +75,78 @@ export default function Dashboard() {
         <div className="flex items-center justify-between mb-6">
           <div>
             <h1 className="text-3xl font-bold text-gray-800">Dashboard</h1>
-            <p className="text-gray-600 mt-2">Campaign statistics will be displayed here</p>
+            <p className="text-gray-600 mt-2">Manage your campaigns and settings</p>
           </div>
-          <DashboardControls onStart={start} onStop={stop} running={running} />
+          {activeTab === 'overview' && (
+            <DashboardControls onStart={start} onStop={stop} running={running} />
+          )}
         </div>
 
-        {/* Setup Warning Banner */}
-        {needsSetup.length > 0 && (
-          <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6">
-            <div className="flex items-start">
-              <div className="flex-shrink-0">
-                <svg className="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                </svg>
-              </div>
-              <div className="ml-3 flex-1">
-                <h3 className="text-sm font-medium text-yellow-800">Action Required: Reconnect TikTok Accounts</h3>
-                <div className="mt-2 text-sm text-yellow-700">
-                  <p>These accounts need to be reconnected:</p>
-                  <ul className="mt-1 list-disc list-inside">
-                    {needsSetup.map(a => (
-                      <li key={a.id}>@{a.account_identifier} (ID: {a.id})</li>
-                    ))}
-                  </ul>
-                  <p className="mt-2 text-xs">This is a one-time setup after the app update.</p>
-                </div>
-                <button
-                  onClick={() => setShowSetupModal(true)}
-                  className="mt-3 text-sm font-medium text-yellow-800 hover:text-yellow-900 underline"
-                >
-                  Fix Now →
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+        {/* Tab Navigation */}
+        <div className="mb-6 border-b border-gray-200">
+          <nav className="-mb-px flex gap-8">
+            <button
+              onClick={() => setActiveTab('overview')}
+              className={`py-2 px-1 border-b-2 font-medium text-sm ${
+                activeTab === 'overview'
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              Overview
+            </button>
+            <button
+              onClick={() => setActiveTab('settings')}
+              className={`py-2 px-1 border-b-2 font-medium text-sm ${
+                activeTab === 'settings'
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              Settings
+            </button>
+          </nav>
+        </div>
 
-        <div className="bg-white rounded-lg p-6">Main dashboard content (charts, stats)</div>
+        {/* Tab Content */}
+        {activeTab === 'overview' ? (
+          <>
+            {/* Setup Warning Banner */}
+            {needsSetup.length > 0 && (
+              <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6">
+                <div className="flex items-start">
+                  <div className="flex-shrink-0">
+                    <svg className="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                    </svg>
+                  </div>
+                  <div className="ml-3 flex-1">
+                    <h3 className="text-sm font-medium text-yellow-800">Action Required: Reconnect TikTok Accounts</h3>
+                    <div className="mt-2 text-sm text-yellow-700">
+                      <p>These accounts need to be reconnected:</p>
+                      <ul className="mt-1 list-disc list-inside">
+                        {needsSetup.map(a => (
+                          <li key={a.id}>@{a.account_identifier} (ID: {a.id})</li>
+                        ))}
+                      </ul>
+                      <p className="mt-2 text-xs">This is a one-time setup after the app update.</p>
+                    </div>
+                    <button
+                      onClick={() => setShowSetupModal(true)}
+                      className="mt-3 text-sm font-medium text-yellow-800 hover:text-yellow-900 underline"
+                    >
+                      Fix Now →
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="bg-white rounded-lg p-6">Main dashboard content (charts, stats)</div>
+          </>
+        ) : (
+          <Settings />
+        )}
       </div>
       <SidebarFeed />
 

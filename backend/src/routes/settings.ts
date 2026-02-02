@@ -10,7 +10,7 @@ router.get('/', authenticateToken, async (req: AuthRequest, res) => {
     const userId = req.userId;
 
     const [config]: any = await db.query(
-      'SELECT keywords, ai_prompt, example_dm, example_comment FROM user_config WHERE user_id = ?',
+      'SELECT keywords, ai_prompt, example_dm, example_comment, openai_api_key FROM user_config WHERE user_id = ?',
       [userId]
     );
 
@@ -39,13 +39,13 @@ router.get('/', authenticateToken, async (req: AuthRequest, res) => {
 router.put('/', authenticateToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.userId;
-    const { keywords, aiPrompt, exampleDM, exampleComment } = req.body;
+    const { keywords, aiPrompt, exampleDM, exampleComment, openaiApiKey } = req.body;
 
     await db.query(
       `UPDATE user_config 
-       SET keywords = ?, ai_prompt = ?, example_dm = ?, example_comment = ?
+       SET keywords = ?, ai_prompt = ?, example_dm = ?, example_comment = ?, openai_api_key = ?
        WHERE user_id = ?`,
-      [keywords, aiPrompt, exampleDM, exampleComment, userId]
+      [keywords, aiPrompt, exampleDM, exampleComment, openaiApiKey, userId]
     );
 
     res.json({ message: 'Settings updated successfully' });

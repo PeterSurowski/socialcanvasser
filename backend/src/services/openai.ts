@@ -51,10 +51,10 @@ Your task:
 User's Business Context:
 ${userConfig.aiPrompt}
 
-Example DM Style (match this tone/style/length):
+The following is guidance on crafting DM messages:
 ${userConfig.exampleDM}
 
-Example Comment Reply Style (match this tone/style, MAX 150 characters):
+The following is guidance on crafting comment replies (this must be 150 characters or less):
 ${userConfig.exampleComment}
 
 CRITICAL RULES:
@@ -76,7 +76,7 @@ For each comment, respond in this EXACT JSON format (no other text):
     {
       "username": "username1",
       "hasBuyingIntent": true,
-      "customizedDM": "Hey [name]! I saw your comment about [specific thing]. I totally get it - [relate to their situation]. [Your solution/offer]. Would love to chat more if you're interested!",
+      "customizedDM": "Hey [name]! I saw your comment about [specific thing]. I totally get it - [relate to their situation]. [Your solution/offer]. I'm happy to share my experiences, if you're interested!",
       "customizedReply": "I can help with that! 😊 Sending you a message"
     },
     {

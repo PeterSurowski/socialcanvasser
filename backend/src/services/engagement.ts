@@ -95,8 +95,8 @@ export async function tryToSendDM(
     const profileUrl = `https://www.tiktok.com/@${username}`;
     console.log(`[Engagement] 🔍 Step 2/5: Navigating to profile: ${profileUrl}`);
     await page.goto(profileUrl, {
-      waitUntil: 'networkidle2',
-      timeout: 15000
+      waitUntil: 'domcontentloaded', // Less strict than networkidle2 for heavy TikTok pages
+      timeout: 30000 // Increased from 15s to 30s
     });
     
     await new Promise(resolve => setTimeout(resolve, 2000));
@@ -354,27 +354,49 @@ export async function tryToSendDM(
       return { success: false, error: 'Failed to click Send button' };
     }
     
-    // Check if message failed to send (failure icon appears within 2 seconds)
+    // Check if message failed to send (failure icon appears after sending)
     console.log(`[Engagement] Checking if message sent successfully...`);
-    try {
-      await page.waitForSelector('.css-1ngp6v6-7937d88b--StyledIconFail', {
-        timeout: 2000,
-        visible: true
-      });
+    
+    // Wait for the page to update after clicking Send
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    
+    // Check for the dm-warning icon in the message that was just sent
+    const hasFailureIcon = await page.evaluate(() => {
+      // Find the most recent message (last chat item)
+      const chatItems = document.querySelectorAll('[data-e2e="chat-item"]');
+      if (chatItems.length === 0) {
+        return { found: false, visible: false, reason: 'No chat items found', chatItemCount: 0 };
+      }
       
-      // Failure icon appeared - message didn't send (privacy settings, etc)
+      const lastMessage = chatItems[chatItems.length - 1];
+      const warningIcon = lastMessage.querySelector('[data-e2e="dm-warning"]');
+      
+      if (warningIcon) {
+        // Check if it's visible
+        const isVisible = (warningIcon as HTMLElement).offsetParent !== null;
+        return { 
+          found: true, 
+          visible: isVisible,
+          chatItemCount: chatItems.length,
+          reason: `Warning icon ${isVisible ? 'visible' : 'hidden'} in last message`
+        };
+      }
+      
+      return { found: false, visible: false, chatItemCount: chatItems.length, reason: 'No warning icon in last message' };
+    });
+    
+    console.log(`[Engagement] Failure icon check result:`, hasFailureIcon);
+    
+    if (hasFailureIcon.found && hasFailureIcon.visible) {
       console.log(`[Engagement] ❌ DM failed to send - failure icon detected (user may have privacy settings blocking DMs)`);
       
       // Remove navigation listener before returning
       page.removeAllListeners('framenavigated');
       
       return { success: false, error: 'Message failed to send - user privacy settings may block DMs' };
-    } catch (timeoutError) {
-      // Timeout means no failure icon appeared - message sent successfully!
-      console.log(`[Engagement] ✅ No failure icon detected - DM sent successfully to @${username}`);
     }
     
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    console.log(`[Engagement] ✅ No failure icon detected - DM sent successfully to @${username}`);
     
     console.log(`[Engagement] ✅ DM sent to @${username}`);
     
@@ -399,10 +421,12 @@ export async function tryToSendDM(
 export async function postCommentReply(
   page: Page,
   videoUrl: string,
-  commentText: string
+  commentText: string,
+  targetUsername: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
     console.log(`[Engagement] 📝 postCommentReply() called for video: ${videoUrl}`);
+    console.log(`[Engagement] 🎯 Looking for comment from @${targetUsername}`);
     
     // CRITICAL: Check current URL and navigate if needed
     const currentUrl = page.url();
@@ -416,8 +440,8 @@ export async function postCommentReply(
       
       try {
         await page.goto(videoUrl, {
-          waitUntil: 'networkidle2',
-          timeout: 15000
+          waitUntil: 'domcontentloaded',
+          timeout: 30000
         });
         console.log(`[Engagement] ✅ Navigation completed (URL changed)`);
         
@@ -438,24 +462,84 @@ export async function postCommentReply(
       console.log(`[Engagement] ✅ Already on video page, no navigation needed`);
     }
     
-    // Verify we actually have video content (not inbox)
-    const pageCheck = await page.evaluate(() => {
+    // CRITICAL: Wait for comment button to be available before checking comments
+    console.log(`[Engagement] ⏳ Waiting for comment button to render...`);
+    try {
+      await page.waitForSelector('[data-e2e="comment-icon"]', {
+        timeout: 10000,
+        visible: true
+      });
+      console.log(`[Engagement] ✅ Comment button is now visible`);
+    } catch (btnWait) {
+      console.log(`[Engagement] ⚠️ Comment button did not appear, checking if comments already open...`);
+    }
+    
+    // Now check if comments are already visible or if we need to click button
+    const commentsCheck = await page.evaluate(() => {
+      const comments = document.querySelectorAll('[data-e2e="comment-level-1"]');
+      const commentButton = document.querySelector('[data-e2e="comment-icon"]');
       return {
-        hasComments: document.querySelectorAll('[data-e2e="comment-level-1"]').length > 0,
-        hasInbox: document.querySelectorAll('[data-e2e="inbox-bar"]').length > 0,
-        url: window.location.href
+        commentsVisible: comments.length > 0,
+        commentButtonExists: !!commentButton
       };
     });
     
-    console.log(`[Engagement] 🔍 Page content check:`, pageCheck);
+    console.log(`[Engagement] 🔍 Comments panel check:`, commentsCheck);
     
-    if (pageCheck.hasInbox && !pageCheck.hasComments) {
-      console.log(`[Engagement] ❌ Still on inbox page after navigation! Actual URL: ${pageCheck.url}`);
-      return { success: false, error: 'Page stuck on inbox after navigation' };
+    if (!commentsCheck.commentsVisible && commentsCheck.commentButtonExists) {
+      console.log(`[Engagement] 📂 Comments not visible, clicking comment button to open panel...`);
+      try {
+        // Click the comment button
+        const clickResult = await page.evaluate(() => {
+          const commentIcon = document.querySelector('[data-e2e="comment-icon"]');
+          if (commentIcon) {
+            const button = commentIcon.closest('button');
+            if (button) {
+              (button as HTMLElement).click();
+              return { clicked: true, buttonText: button.getAttribute('aria-label') };
+            }
+          }
+          return { clicked: false, buttonText: null };
+        });
+        console.log(`[Engagement] 🖱️ Comment button click result:`, clickResult);
+        
+        if (!clickResult.clicked) {
+          console.log(`[Engagement] ❌ Failed to click comment button`);
+          return { success: false, error: 'Could not click comment button' };
+        }
+        
+        // Wait longer for comments section to animate open
+        await new Promise(resolve => setTimeout(resolve, 3000)); // Increased from 2s to 3s
+        
+        // Wait for comments to load (try multiple selectors)
+        try {
+          await page.waitForSelector('[data-e2e="comment-level-1"]', { 
+            timeout: 8000,
+            visible: true
+          });
+          console.log(`[Engagement] ✅ Comments panel opened and comments loaded!`);
+        } catch (waitErr) {
+          // Check if any comments loaded at all
+          const commentCount = await page.evaluate(() => {
+            return document.querySelectorAll('[data-e2e="comment-level-1"]').length;
+          });
+          console.log(`[Engagement] ⚠️ Wait timeout, but found ${commentCount} comments in DOM`);
+          if (commentCount === 0) {
+            return { success: false, error: 'No comments loaded after clicking button' };
+          }
+        }
+      } catch (openError) {
+        console.log(`[Engagement] ⚠️ Could not open comments panel:`, openError);
+        return { success: false, error: 'Failed to open comments section' };
+      }
+    } else if (commentsCheck.commentsVisible) {
+      console.log(`[Engagement] ✅ Comments already visible, no need to click button`);
+    } else {
+      console.log(`[Engagement] ⚠️ Comment button not found on page`);
     }
     
-    // Method 1: Try to click Reply button on the first comment (more natural for engagement)
-    console.log(`[Engagement] 🔍 Looking for Reply button on comments...`);
+    // CRITICAL: Find the specific comment from targetUsername and click its Reply button
+    console.log(`[Engagement] 🔍 Looking for @${targetUsername}'s comment...`);
     
     // Wait for comments to load
     console.log(`[Engagement] Waiting for comments to load...`);
@@ -467,6 +551,218 @@ export async function postCommentReply(
     } catch (waitErr) {
       console.log(`[Engagement] ⚠️ Timeout waiting for comments, continuing anyway...`);
     }
+    
+    // CRITICAL: Scroll comments with mouse hover to load ALL comments before searching for target user
+    console.log(`[Engagement] 📜 Scrolling comments to load all comments...`);
+    
+    // Get total comment count and container position
+    const scrollInfo = await page.evaluate(() => {
+      // CRITICAL: Detect browser zoom level
+      // When browser is zoomed out, all coordinates are scaled by the zoom factor
+      const zoom = window.devicePixelRatio || 1;
+      const computedZoom = parseFloat(getComputedStyle(document.body).zoom || '1');
+      const effectiveZoom = zoom / computedZoom;
+      
+      console.log(`[Browser] Zoom level: ${effectiveZoom} (devicePixelRatio: ${zoom}, body zoom: ${computedZoom})`);
+      
+      // Get total comment count from the UI
+      const commentsCountEl = document.querySelector('[class*="DivCommentCountContainer"]') ||
+                             document.querySelector('[data-e2e="comment-count"]') ||
+                             document.querySelector('[data-e2e="browse-comment-count"]') ||
+                             document.querySelector('[class*="comment-count"]') ||
+                             document.querySelector('[class*="CommentCount"]');
+      const totalComments = parseInt(commentsCountEl?.textContent?.replace(/[^0-9]/g, '') || '0', 10);
+      
+      // CRITICAL: Find the COMMENTS panel scrollable container, NOT the video sidebar
+      // Look for the actual comment list container with the specific class pattern
+      const containers = Array.from(document.querySelectorAll('[class*="DivCommentListContainer"], [class*="DivCommentMain"], [class*="DivScrollingContentContainer"]'));
+      
+      console.log(`[Browser] Found ${containers.length} potential comment containers`);
+      
+      const container = containers.find(el => {
+        const rect = el.getBoundingClientRect();
+        // Comments panel is wider (typically 300-400px), video sidebar is narrow (~72px)
+        // With zoom, dimensions scale accordingly
+        const hasGoodDimensions = rect.width > 150 && rect.height > 150;
+        
+        if (hasGoodDimensions) {
+          console.log(`[Browser] Container candidate:`, {
+            class: el.className.substring(0, 50),
+            width: rect.width,
+            height: rect.height,
+            left: rect.left,
+            top: rect.top
+          });
+        }
+        
+        return hasGoodDimensions;
+      }) as HTMLElement | undefined;
+      
+      if (container) {
+        const rect = container.getBoundingClientRect();
+        
+        // Position mouse in the center horizontally
+        const x = rect.left + rect.width / 2;
+        
+        // Position mouse in visible area vertically
+        // Account for any scroll offset and keep within viewport
+        const viewportHeight = window.innerHeight;
+        const safeTopOffset = 200; // pixels from top of container
+        const y = Math.min(rect.top + safeTopOffset, viewportHeight * 0.6);
+        
+        console.log(`[Browser] Selected container:`, {
+          class: container.className,
+          rectLeft: rect.left,
+          rectTop: rect.top,
+          rectWidth: rect.width,
+          rectHeight: rect.height,
+          calculatedX: x,
+          calculatedY: y,
+          viewportHeight: viewportHeight
+        });
+        
+        return {
+          found: true,
+          x: x,
+          y: y,
+          totalComments,
+          zoom: effectiveZoom,
+          containerClass: container.className,
+          rectInfo: { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+        };
+      }
+      
+      console.log(`[Browser] ❌ No suitable comment container found`);
+      return { found: false, totalComments, zoom: effectiveZoom };
+    });
+    
+    console.log(`[Engagement] 📊 Total comments on video: ${scrollInfo.totalComments}`);
+    console.log(`[Engagement] 🔍 Browser zoom level: ${scrollInfo.zoom || 'unknown'}`);
+    
+    if (scrollInfo.found) {
+      console.log(`[Engagement] ✅ Scrollable container found: ${scrollInfo.containerClass?.substring(0, 60)}...`);
+      console.log(`[Engagement] 📐 Container rect:`, scrollInfo.rectInfo);
+      console.log(`[Engagement] 🖱️ Calculated mouse position: (${Math.round(scrollInfo.x)}, ${Math.round(scrollInfo.y)})`);
+      
+      // Move mouse to hover over the SCROLLABLE container
+      await page.mouse.move(scrollInfo.x, scrollInfo.y);
+      console.log(`[Engagement] ✅ Mouse positioned over comments section`);
+      await new Promise(resolve => setTimeout(resolve, 1500)); // Give time for hover to register
+      
+      let loadedComments = 0;
+      let scrollAttempts = 0;
+      const maxScrollAttempts = 50; // Safety limit
+      let noChangeCount = 0;
+      
+      // Keep scrolling until we've loaded all comments
+      while (loadedComments < scrollInfo.totalComments && scrollAttempts < maxScrollAttempts) {
+        scrollAttempts++;
+        
+        const beforeCount = loadedComments;
+        
+        // Use Puppeteer's trusted mouse wheel event (mouse already positioned over scrollable container)
+        await page.mouse.wheel({ deltaY: 800 });
+        
+        // Wait longer for TikTok's lazy loading (increased from 500ms to 1500ms)
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        
+        // Count after scrolling
+        loadedComments = await page.evaluate(() => {
+          return document.querySelectorAll('[data-e2e="comment-level-1"]').length;
+        });
+        
+        const increased = loadedComments > beforeCount;
+        console.log(`[Engagement] 🔄 Scroll ${scrollAttempts}: ${beforeCount} → ${loadedComments}/${scrollInfo.totalComments} comments ${increased ? '✅ (NEW!)' : '⚠️ (no change)'}`);
+        
+        if (loadedComments >= scrollInfo.totalComments) {
+          console.log(`[Engagement] ✅ All comments loaded!`);
+          break;
+        }
+        
+        // Track consecutive failures
+        if (!increased) {
+          noChangeCount++;
+          if (noChangeCount >= 3) {
+            console.log(`[Engagement] ⚠️ No new comments after ${noChangeCount} scroll attempts - may have hit limit`);
+            break;
+          }
+        } else {
+          noChangeCount = 0; // Reset on success
+        }
+      }
+      
+      if (scrollAttempts >= maxScrollAttempts) {
+        console.log(`[Engagement] ⚠️ Reached max scroll attempts (${maxScrollAttempts}), proceeding with ${loadedComments} comments loaded`);
+      }
+      
+      console.log(`[Engagement] ✅ Scrolling complete, now searching for @${targetUsername}...`);
+    } else {
+      console.log(`[Engagement] ⚠️ Could not find comments container for scrolling, proceeding with search...`);
+    }
+    
+    // Find the specific comment from targetUsername
+    const targetCommentIndex = await page.evaluate((username) => {
+      const comments = Array.from(document.querySelectorAll('[data-e2e="comment-level-1"]'));
+      
+      console.log(`[Browser] Searching ${comments.length} comments for @${username}...`);
+      
+      // Find the comment from this specific user
+      for (let i = 0; i < comments.length; i++) {
+        const comment = comments[i];
+        
+        // Try multiple methods to find the username
+        let commentUsername = '';
+        
+        // Method 1: Look for username in data-e2e="comment-username-*" wrapper (most reliable)
+        const usernameWrapper = comment.querySelector('[data-e2e^="comment-username"]');
+        if (usernameWrapper) {
+          // Get the <a> or <p> tag inside the wrapper
+          const link = usernameWrapper.querySelector('a[href*="/@"]');
+          if (link) {
+            // Extract from href (most reliable): /@username -> username
+            const href = link.getAttribute('href') || '';
+            const match = href.match(/\/@([^/?]+)/);
+            if (match) {
+              commentUsername = match[1];
+            }
+            // Fallback: get text content
+            if (!commentUsername) {
+              commentUsername = link.textContent?.trim() || '';
+            }
+          }
+        }
+        
+        // Method 2: Direct link search (fallback)
+        if (!commentUsername) {
+          const link = comment.querySelector('a[href*="/@"]');
+          if (link) {
+            const href = link.getAttribute('href') || '';
+            const match = href.match(/\/@([^/?]+)/);
+            if (match) {
+              commentUsername = match[1];
+            }
+          }
+        }
+        
+        // Clean up the username
+        commentUsername = commentUsername.replace('@', '').trim();
+        
+        if (commentUsername && commentUsername.toLowerCase() === username.toLowerCase()) {
+          console.log(`[Browser] ✅ Found @${username} at comment index ${i}`);
+          return i; // Return the index of the matching comment
+        }
+      }
+      
+      console.log(`[Browser] ❌ Could not find @${username} in any of the ${comments.length} comments`);
+      return -1; // Not found
+    }, targetUsername);
+    
+    if (targetCommentIndex === -1) {
+      console.log(`[Engagement] ❌ Could not find comment from @${targetUsername}`);
+      return { success: false, error: `Comment from @${targetUsername} not found on page` };
+    }
+    
+    console.log(`[Engagement] ✅ Found @${targetUsername}'s comment at index ${targetCommentIndex}`);
     
     const replyButtonInfo = await page.evaluate(() => {
       // First, try to find reply buttons with data-e2e attribute (e.g., data-e2e="comment-reply-1")
@@ -511,43 +807,44 @@ export async function postCommentReply(
       console.log(`  - role="button" texts:`, replyButtonInfo.diagnostics.roleButtonTexts);
     }
     
-    const replyClicked = await page.evaluate(() => {
+    const replyClicked = await page.evaluate((commentIndex) => {
       // Method 1: Try data-e2e attribute (e.g., data-e2e="comment-reply-1")
       let replyButtons = Array.from(document.querySelectorAll('[data-e2e^="comment-reply"]'));
       
-      if (replyButtons.length > 0) {
-        const firstReply = replyButtons[0] as HTMLElement;
-        firstReply.click();
+      if (replyButtons.length > commentIndex) {
+        const targetReply = replyButtons[commentIndex] as HTMLElement;
+        targetReply.click();
         return { success: true, method: 'data-e2e attribute' };
       }
       
       // Method 2: Try <p> tag with aria-label="Reply" (matches actual HTML)
       const replyParagraphs = Array.from(document.querySelectorAll('p.TUXText[role="button"][aria-label="Reply"]'));
-      if (replyParagraphs.length > 0) {
-        (replyParagraphs[0] as HTMLElement).click();
+      if (replyParagraphs.length > commentIndex) {
+        (replyParagraphs[commentIndex] as HTMLElement).click();
         return { success: true, method: 'p[aria-label="Reply"]' };
       }
       
       // Method 3: Look inside DivReplyTriggerWrapper for <p> with "Reply" text
       const replyWrappers = Array.from(document.querySelectorAll('[class*="DivReplyTriggerWrapper"]'));
-      for (const wrapper of replyWrappers) {
-        const replyText = wrapper.querySelector('p[role="button"]') as HTMLElement;
+      if (replyWrappers.length > commentIndex) {
+        const targetWrapper = replyWrappers[commentIndex];
+        const replyText = targetWrapper.querySelector('p[role="button"]') as HTMLElement;
         if (replyText && replyText.textContent?.trim() === 'Reply') {
           replyText.click();
           return { success: true, method: 'DivReplyTriggerWrapper > p' };
         }
       }
       
-      // Method 4: Any role="button" with "Reply" text
+      // Method 4: Any role="button" with "Reply" text (collect all, then select by index)
       const allElements = Array.from(document.querySelectorAll('[role="button"]'));
-      const replyButton = allElements.find(el => el.textContent?.trim() === 'Reply');
-      if (replyButton) {
-        (replyButton as HTMLElement).click();
+      const replyTextButtons = allElements.filter(el => el.textContent?.trim() === 'Reply');
+      if (replyTextButtons.length > commentIndex) {
+        (replyTextButtons[commentIndex] as HTMLElement).click();
         return { success: true, method: 'role="button" with Reply text' };
       }
       
       return { success: false };
-    });
+    }, targetCommentIndex);
     
     console.log(`[Engagement] Reply button click result:`, replyClicked);
     
@@ -561,20 +858,11 @@ export async function postCommentReply(
     // Wait for the reply input panel to appear after clicking Reply
     await new Promise(resolve => setTimeout(resolve, 2000));
     
-    // Find the comment input (now uses .comment-panel-input class with Draft.js contenteditable)
-    const inputFound = await page.evaluate((text) => {
-      // Look for the comment panel input (appears after clicking Reply)
-      const commentPanelInput = document.querySelector('.comment-panel-input [contenteditable="true"]') as HTMLElement;
-      if (commentPanelInput) {
-        // Clear and set content
-        commentPanelInput.innerText = text;
-        commentPanelInput.dispatchEvent(new Event('input', { bubbles: true }));
-        commentPanelInput.dispatchEvent(new Event('change', { bubbles: true }));
-        return true;
-      }
-      
-      // Fallback: try other selectors
+    // Find and focus the comment input - use Puppeteer's native typing to trigger React events properly
+    const inputSelector = await page.evaluate(() => {
+      // Try different selectors for the comment input
       const selectors = [
+        '.comment-panel-input [contenteditable="true"]',
         '[data-e2e="comment-input"] [contenteditable="true"]',
         '[data-e2e="comment-text"] [contenteditable="true"]',
         'div[contenteditable="true"][role="textbox"]'
@@ -583,34 +871,66 @@ export async function postCommentReply(
       for (const selector of selectors) {
         const input = document.querySelector(selector) as HTMLElement;
         if (input) {
-          input.innerText = text;
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          return true;
+          // Focus the element to prepare for typing
+          input.focus();
+          return selector;
         }
       }
-      return false;
-    }, commentText);
+      return null;
+    });
     
-    if (!inputFound) {
+    if (!inputSelector) {
       return { success: false, error: 'Comment input box not found after clicking Reply' };
     }
     
-    console.log(`[Engagement] Text entered into comment input`);
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    console.log(`[Engagement] Found comment input with selector: ${inputSelector}`);
+    
+    // Use Puppeteer's type() method which properly simulates keyboard events
+    // This triggers React's onChange handlers that setting innerText doesn't
+    try {
+      await page.type(inputSelector, commentText, { delay: 50 }); // 50ms delay between keystrokes for more natural typing
+      console.log(`[Engagement] Text entered into comment input using native typing`);
+    } catch (typeError) {
+      console.log(`[Engagement] ❌ Error typing into comment input:`, typeError);
+      return { success: false, error: 'Failed to type into comment input' };
+    }
+    
+    // Wait for Post button to become enabled (disabled attribute removed)
+    console.log(`[Engagement] Waiting for Post button to become enabled...`);
+    try {
+      await page.waitForFunction(
+        () => {
+          const postButton = document.querySelector('[data-e2e="comment-post"]') as HTMLButtonElement;
+          return postButton && !postButton.disabled && !postButton.hasAttribute('disabled');
+        },
+        { timeout: 5000 }
+      );
+      console.log(`[Engagement] ✅ Post button is now enabled!`);
+    } catch (waitError) {
+      console.log(`[Engagement] ⚠️ Post button did not become enabled within 5 seconds`);
+      return { success: false, error: 'Post button remained disabled after typing comment' };
+    }
+    
+    // Small delay to ensure button is fully ready
+    await new Promise(resolve => setTimeout(resolve, 500));
     
     // Click post button (data-e2e="comment-post")
+    console.log(`[Engagement] Clicking Post button...`);
     const posted = await page.evaluate(() => {
       const postButton = document.querySelector('[data-e2e="comment-post"]') as HTMLButtonElement;
-      if (postButton && !postButton.disabled && !postButton.hasAttribute('aria-disabled')) {
+      if (postButton && !postButton.disabled && !postButton.hasAttribute('disabled')) {
         postButton.click();
-        return true;
+        return { success: true, wasDisabled: false };
       }
-      return false;
+      return { success: false, wasDisabled: postButton?.disabled || false };
     });
     
-    if (!posted) {
-      return { success: false, error: 'Post button not found or disabled' };
+    if (!posted.success) {
+      console.log(`[Engagement] ❌ Post button still disabled:`, posted);
+      return { success: false, error: 'Post button not found or still disabled' };
     }
+    
+    console.log(`[Engagement] ✅ Post button clicked!`);
     
     await new Promise(resolve => setTimeout(resolve, 2000));
     
@@ -662,7 +982,7 @@ export async function engageWithUser(
   console.log(`[Engagement] ❌ DM failed for @${username}: ${dmResult.error}`);
   console.log(`[Engagement] Step 2: Falling back to comment reply...`);
   
-  const commentResult = await postCommentReply(page, videoUrl, commentMessage);
+  const commentResult = await postCommentReply(page, videoUrl, commentMessage, username);
   
   if (commentResult.success) {
     console.log(`[Engagement] ✅ Comment reply successfully posted for @${username}`);

@@ -164,11 +164,30 @@ export async function searchTikTokByKeywords(
     console.log(`[TikTok Search] Searching for keyword: "${keyword}" (index ${keywordIndex}/${keywords.length - 1})`);
     
     try {
-      // Navigate to TikTok search
-      await page.goto(`https://www.tiktok.com/search?q=${encodeURIComponent(keyword)}`, {
+      // Navigate to TikTok search first
+      const searchUrl = `https://www.tiktok.com/search?q=${encodeURIComponent(keyword)}`;
+      console.log(`[TikTok Search] Navigating to: ${searchUrl}`);
+      await page.goto(searchUrl, {
         waitUntil: 'networkidle2',
         timeout: 30000
       });
+      
+      // Now clear TikTok's cache/state to prevent cached search results
+      console.log(`[TikTok Search] Clearing TikTok cache for fresh results...`);
+      await page.evaluate(() => {
+        sessionStorage.clear();
+        localStorage.clear();
+      });
+      
+      // Reload with cache-busting timestamp
+      const timestamp = Date.now();
+      const freshUrl = `https://www.tiktok.com/search?q=${encodeURIComponent(keyword)}&t=${timestamp}`;
+      console.log(`[TikTok Search] Reloading with cache-buster: ${freshUrl}`);
+      await page.goto(freshUrl, {
+        waitUntil: 'networkidle2',
+        timeout: 30000
+      });
+      
     } catch (navError) {
       console.log(`[TikTok Search] Navigation timeout for keyword: ${keyword}, continuing...`);
       // Continue anyway, page might have loaded partially
@@ -257,95 +276,149 @@ export async function searchTikTokByKeywords(
       // Extract post data using multiple strategies - but now we'll click each video
       let posts = [];
       try {
-        // First, get all video elements from search results
-        const videoElements = await page.evaluate(() => {
-          // Try multiple selectors for video containers
-          let items: Element[] = [];
-          const selectors = [
-            '[data-e2e="feed-video"]',
-            'section[data-e2e="feed-video"]',
-            '[data-e2e="search-video-item"]',
-            'section[id^="media-card-"]'
-          ];
+        // First, let's diagnose what's actually on the page
+        const pageDiagnostics = await page.evaluate(() => {
+          // Get the search query from the URL
+          const urlParams = new URLSearchParams(window.location.search);
+          const searchQuery = urlParams.get('q');
           
-          for (const selector of selectors) {
-            items = Array.from(document.querySelectorAll(selector));
-            if (items.length > 0) break;
-          }
+          // Get the page title
+          const title = document.title;
           
-          // If still no items, find all links to videos
-          if (items.length === 0) {
-            const videoLinks = Array.from(document.querySelectorAll('a[href*="/video/"]'));
-            items = videoLinks.map(link => {
-              let parent = link.parentElement;
-              for (let i = 0; i < 5 && parent; i++) {
-                parent = parent.parentElement;
-                if (parent && parent.querySelector('a[href*="/@"]')) {
-                  return parent;
-                }
-              }
-              return link.parentElement;
-            }).filter((el): el is Element => el !== null);
-          }
+          // Get the search input value (what TikTok thinks we searched for)
+          const searchInput = document.querySelector('[data-e2e="search-user-input"]') as HTMLInputElement;
+          const inputValue = searchInput?.value || '';
           
-          // Return element indices so we can click them later
-          return items.slice(0, 10).map((item, index) => index);
+          // Check if there's a "No results" message
+          const noResults = document.body.innerText.includes('No results found') || 
+                           document.body.innerText.includes('No videos found');
+          
+          return { 
+            urlQuery: searchQuery, 
+            pageTitle: title, 
+            searchInputValue: inputValue,
+            noResults,
+            currentUrl: window.location.href
+          };
         });
         
-        console.log(`[TikTok Search] Found ${videoElements.length} videos, will click each one to extract comments...`);
+        console.log(`[TikTok Search] 🔍 Page Diagnostics:`, pageDiagnostics);
         
-        // For each video, click it and extract all data
-        for (let videoIndex of videoElements) {
+        // Check if we're actually on a search results page with the right keyword
+        if (!pageDiagnostics.currentUrl.includes('/search') || 
+            !pageDiagnostics.urlQuery || 
+            pageDiagnostics.urlQuery.toLowerCase() !== keyword.toLowerCase()) {
+          console.log(`[TikTok Search] ⚠️ WARNING: Page URL doesn't match keyword!`);
+          console.log(`[TikTok Search]   Expected keyword: "${keyword}"`);
+          console.log(`[TikTok Search]   URL has: "${pageDiagnostics.urlQuery}"`);
+        }
+        
+        // First, get all video elements from search results AND extract their URLs for verification
+        const videoElements = await page.evaluate(() => {
+          const debugInfo = {
+            currentUrl: window.location.href,
+            pageTitle: document.title,
+            selectorUsed: '',
+            itemsFound: 0,
+            itemDetails: [] as string[],
+            videoLinksCount: 0,
+            results: [] as { index: number; href: string }[]
+          };
+          
+          // TikTok's actual search results structure (based on real HTML):
+          // Container: div[data-e2e="search_top-item-list"]
+          // Items: div[data-e2e="search_top-item"]
+          // Links: a[href*="/video/"] inside each item
+          
+          let items: Element[] = [];
+          
+          // PRIMARY: Look for search_top-item elements (the actual search results!)
+          items = Array.from(document.querySelectorAll('[data-e2e="search_top-item"]'));
+          if (items.length > 0) {
+            debugInfo.selectorUsed = '[data-e2e="search_top-item"]';
+            debugInfo.itemsFound = items.length;
+            debugInfo.itemDetails = items.slice(0, 3).map((item, i) => {
+              const link = item.querySelector('a[href*="/video/"]');
+              const href = link?.getAttribute('href') || 'no link found';
+              const isVisible = (item as HTMLElement).offsetParent !== null;
+              return `Item ${i}: href=${href}, visible=${isVisible}`;
+            });
+          }
+          
+          // FALLBACK: If search_top-item not found, try other selectors
+          if (items.length === 0) {
+            const fallbackSelectors = [
+              '[data-e2e="feed-video"]',
+              'section[data-e2e="feed-video"]',
+              '[data-e2e="search-video-item"]',
+              'section[id^="media-card-"]',
+              'div[id^="grid-item-container-"]'
+            ];
+            
+            for (const selector of fallbackSelectors) {
+              items = Array.from(document.querySelectorAll(selector));
+              if (items.length > 0) {
+                debugInfo.selectorUsed = selector;
+                debugInfo.itemsFound = items.length;
+                debugInfo.itemDetails = items.slice(0, 3).map((item, i) => {
+                  return `Item ${i}: tagName=${item.tagName}, classes=${item.className.substring(0, 50)}`;
+                });
+                break;
+              }
+            }
+          }
+          
+          // Extract video URLs from the found items
+          debugInfo.results = items.slice(0, 10).map((item, index) => {
+            const link = item.querySelector('a[href*="/video/"]');
+            const href = link?.getAttribute('href') || 'unknown';
+            return { index, href };
+          }).filter(result => result.href !== 'unknown');
+          
+          return debugInfo;
+        });
+        
+        // Log debug info in Node.js terminal where we can see it
+        console.log(`[EXTRACTION DEBUG] Current URL: ${videoElements.currentUrl}`);
+        console.log(`[EXTRACTION DEBUG] Page title: ${videoElements.pageTitle}`);
+        console.log(`[EXTRACTION DEBUG] Selector used: "${videoElements.selectorUsed}"`);
+        console.log(`[EXTRACTION DEBUG] Items found: ${videoElements.itemsFound}`);
+        if (videoElements.itemDetails.length > 0) {
+          console.log(`[EXTRACTION DEBUG] Item details (first 3):`);
+          videoElements.itemDetails.forEach(detail => console.log(`  ${detail}`));
+        }
+        if (videoElements.videoLinksCount > 0) {
+          console.log(`[EXTRACTION DEBUG] Video links found in fallback: ${videoElements.videoLinksCount}`);
+        }
+        console.log(`[EXTRACTION DEBUG] Extracted ${videoElements.results.length} video URLs:`);
+        videoElements.results.forEach((result, i) => {
+          console.log(`  ${i + 1}. ${result.href}`);
+        });
+        
+        console.log(`[TikTok Search] Found ${videoElements.results.length} videos from search results for keyword "${keyword}":`);
+        videoElements.results.forEach((ve, i) => {
+          console.log(`  ${i + 1}. ${ve.href}`);
+        });
+        
+        // For each video, navigate directly to it instead of clicking (more reliable)
+        for (let i = 0; i < videoElements.results.length; i++) {
+          const videoElement = videoElements.results[i];
+          // Check if href is already a full URL or just a path
+          const videoUrl = videoElement.href.startsWith('http') 
+            ? videoElement.href 
+            : `https://www.tiktok.com${videoElement.href}`;
+          
           try {
-            // Click the video to open it
-            await page.evaluate((index: number) => {
-              const selectors = [
-                '[data-e2e="feed-video"]',
-                'section[data-e2e="feed-video"]',
-                '[data-e2e="search-video-item"]',
-                'section[id^="media-card-"]'
-              ];
-              
-              let items: Element[] = [];
-              for (const selector of selectors) {
-                items = Array.from(document.querySelectorAll(selector));
-                if (items.length > 0) break;
-              }
-              
-              if (items.length === 0) {
-                const videoLinks = Array.from(document.querySelectorAll('a[href*="/video/"]'));
-                items = videoLinks.map(link => {
-                  let parent = link.parentElement;
-                  for (let i = 0; i < 5 && parent; i++) {
-                    parent = parent.parentElement;
-                    if (parent && parent.querySelector('a[href*="/@"]')) {
-                      return parent;
-                    }
-                  }
-                  return link.parentElement;
-                }).filter((el): el is Element => el !== null);
-              }
-              
-              const item = items[index];
-              if (item) {
-                const link = item.querySelector('a[href*="/video/"]') as HTMLElement;
-                if (link) link.click();
-              }
-            }, videoIndex);
+            // Navigate directly to the video URL
+            console.log(`[TikTok Search] Navigating to video ${i + 1}/${videoElements.results.length} (${videoUrl})...`);
             
-            console.log(`[TikTok Search] Clicked video ${videoIndex + 1}/${videoElements.length}, waiting for page load...`);
-            
-            // Wait for URL to change (navigation completion)
             try {
-              await page.waitForFunction(
-                () => window.location.href.includes('/video/'),
-                { timeout: 5000 }
-              );
-              // Extra wait for content to render after URL changes
-              await new Promise(resolve => setTimeout(resolve, 2000));
-            } catch (err) {
-              console.log(`[TikTok Search] URL didn't change to video page, waiting anyway...`);
-              await new Promise(resolve => setTimeout(resolve, 2000));
+              await page.goto(videoUrl, {
+                waitUntil: 'networkidle2',
+                timeout: 15000
+              });
+            } catch (navError) {
+              console.log(`[TikTok Search] Navigation timeout, continuing...`);
             }
             
             // Wait for ACTUAL video page content to load (not just the shell)
@@ -378,15 +451,29 @@ export async function searchTikTokByKeywords(
                 });
                 console.log(`[TikTok Search] Comments button clicked!`);
                 
-                // Wait for comments section to open
-                await new Promise(resolve => setTimeout(resolve, 3000));
+                // Wait for comments section to open and render
+                await new Promise(resolve => setTimeout(resolve, 2000));
                 
-                // Try to wait for comment section specifically
-                await page.waitForSelector('[data-e2e="comment-list"], [data-e2e="browse-comment-list"], [data-e2e="comment-item"]', { 
-                  timeout: 5000 
-                }).catch(() => {
-                  console.log(`[TikTok Search] Comment section still not visible after clicking`);
-                });
+                // CRITICAL: Wait for comment section to be visible before proceeding
+                let commentsReady = false;
+                try {
+                  await page.waitForSelector('[data-e2e="comment-level-1"]', { 
+                    timeout: 8000,
+                    visible: true // Wait for it to be VISIBLE, not just in DOM
+                  });
+                  commentsReady = true;
+                  console.log(`[TikTok Search] ✅ Comments section is now visible and ready`);
+                } catch (waitErr) {
+                  console.log(`[TikTok Search] ⚠️ Comments section did not become visible after clicking`);
+                }
+                
+                // If comments aren't visible, skip this video
+                if (!commentsReady) {
+                  console.log(`[TikTok Search] Skipping video - comments not accessible`);
+                  await page.goBack();
+                  await new Promise(resolve => setTimeout(resolve, 2000));
+                  continue;
+                }
                 
               } catch (clickErr) {
                 console.log(`[TikTok Search] Could not click comments button:`, clickErr);
@@ -399,68 +486,124 @@ export async function searchTikTokByKeywords(
               continue;
             }
             
-            // Scroll the comments section multiple times to load more comments (lazy loading)
-            // Using scrollIntoView approach from StackOverflow - more reliable for lazy loading
+            // Scroll comments using Puppeteer's trusted mouse events (TikTok blocks synthetic JS scrolling)
             console.log(`[TikTok Search] Scrolling comments section to load more comments...`);
             try {
-              const delay = 2000; // 2 seconds between scroll checks
-              let preCount = 0;
-              let postCount = 0;
-              let scrollAttempts = 0;
-              const maxScrollAttempts = 100; // Prevent infinite loop
-              
-              // Initial diagnostic check
-              const initialDiagnostics = await page.evaluate(() => {
-                const comments = document.querySelectorAll('[data-e2e="comment-level-1"]');
-                const lastComment = document.querySelector('[data-e2e="comment-level-1"]:last-child');
-                return {
-                  commentCount: comments.length,
-                  hasLastComment: !!lastComment,
-                  lastCommentVisible: lastComment ? (lastComment as HTMLElement).offsetParent !== null : false
-                };
-              });
-              console.log(`[TikTok Search] 🔍 Initial scroll diagnostics:`, initialDiagnostics);
-              
-              do {
-                preCount = await page.evaluate(() => {
-                  return document.querySelectorAll('[data-e2e="comment-level-1"]').length;
-                });
+              // Get the scrollable container position and total comment count
+              const scrollInfo = await page.evaluate(() => {
+                // CRITICAL: Detect browser zoom level
+                const zoom = window.devicePixelRatio || 1;
+                const computedZoom = parseFloat(getComputedStyle(document.body).zoom || '1');
+                const effectiveZoom = zoom / computedZoom;
                 
-                // Scroll to the last comment (triggers lazy loading)
-                await page.evaluate(() => {
-                  const lastComment = document.querySelector('[data-e2e="comment-level-1"]:last-child');
-                  if (lastComment) {
-                    lastComment.scrollIntoView({ behavior: 'smooth', block: 'end', inline: 'end' });
+                console.log(`[Browser] Zoom detected: ${effectiveZoom.toFixed(2)}x (devicePixelRatio: ${zoom}, body zoom: ${computedZoom})`);
+                
+                // Get total comment count - prioritize the count that appears after opening comments panel
+                const commentsCountEl = document.querySelector('[class*="DivCommentCountContainer"]') ||
+                                       document.querySelector('[data-e2e="comment-count"]') ||
+                                       document.querySelector('[data-e2e="browse-comment-count"]');
+                const totalComments = parseInt(commentsCountEl?.textContent?.replace(/[^0-9]/g, '') || '0', 10);
+                
+                // Find the COMMENTS panel scrollable container (not video sidebar)
+                const containers = Array.from(document.querySelectorAll('[class*="DivCommentListContainer"], [class*="DivCommentMain"], [class*="DivScrollingContentContainer"]'));
+                
+                console.log(`[Browser] Found ${containers.length} potential containers`);
+                
+                const container = containers.find(el => {
+                  const rect = el.getBoundingClientRect();
+                  // Comments panel is wider (250px+), video sidebar is narrow (~72px)
+                  const isWideEnough = rect.width > 150 && rect.height > 150;
+                  
+                  if (isWideEnough) {
+                    console.log(`[Browser] Container: width=${rect.width.toFixed(0)}px, height=${rect.height.toFixed(0)}px, left=${rect.left.toFixed(0)}px, top=${rect.top.toFixed(0)}px`);
                   }
-                });
+                  
+                  return isWideEnough;
+                }) as HTMLElement | undefined;
                 
-                await new Promise(resolve => setTimeout(resolve, delay));
-                
-                postCount = await page.evaluate(() => {
-                  return document.querySelectorAll('[data-e2e="comment-level-1"]').length;
-                });
-                
-                scrollAttempts++;
-                
-                if (scrollAttempts % 5 === 0 || postCount > preCount) {
-                  console.log(`[TikTok Search] 📊 Scroll attempt ${scrollAttempts}: ${preCount} → ${postCount} comments (${postCount > preCount ? '+' + (postCount - preCount) : 'no change'})`);
+                if (container) {
+                  const rect = container.getBoundingClientRect();
+                  const viewportHeight = window.innerHeight;
+                  
+                  // Position X in center of container
+                  const x = rect.left + rect.width / 2;
+                  
+                  // CRITICAL: Position Y within visible viewport, not at middle of total scrollable height
+                  // rect.height includes ALL scrolled content (can be 2000px+), but viewport is ~600px
+                  const safeYOffset = 200; // pixels below top of container
+                  const y = Math.min(rect.top + safeYOffset, viewportHeight * 0.6);
+                  
+                  console.log(`[Browser] Selected container: x=${x.toFixed(0)}, y=${y.toFixed(0)}, viewport=${viewportHeight}px`);
+                  
+                  return {
+                    found: true,
+                    x: x,
+                    y: y,
+                    totalComments,
+                    zoom: effectiveZoom,
+                    rectInfo: { width: rect.width, height: rect.height, left: rect.left, top: rect.top }
+                  };
                 }
                 
-                // Break if we've scrolled too many times (safety)
-                if (scrollAttempts >= maxScrollAttempts) {
-                  console.log(`[TikTok Search] Reached max scroll attempts (${maxScrollAttempts}), stopping`);
-                  break;
-                }
-                
-              } while (postCount > preCount); // Keep scrolling while new comments load
-              
-              await new Promise(resolve => setTimeout(resolve, delay)); // Final wait
-              
-              const finalCount = await page.evaluate(() => {
-                return document.querySelectorAll('[data-e2e="comment-level-1"]').length;
+                console.log(`[Browser] ❌ No suitable container found`);
+                return { found: false, totalComments, zoom: effectiveZoom };
               });
               
-              console.log(`[TikTok Search] ✅ Finished scrolling after ${scrollAttempts} attempts: loaded ${finalCount} comments`);
+              console.log(`[TikTok Search] 📊 Total comments on video: ${scrollInfo.totalComments}`);
+              console.log(`[TikTok Search] 🔍 Browser zoom: ${scrollInfo.zoom?.toFixed(2)}x`);
+              
+              if (scrollInfo.found) {
+                console.log(`[TikTok Search] 📐 Container rect:`, scrollInfo.rectInfo);
+                console.log(`[TikTok Search] 🖱️ Mouse position: (${Math.round(scrollInfo.x)}, ${Math.round(scrollInfo.y)})`);
+                
+                // Position mouse over the scrollable container
+                await page.mouse.move(scrollInfo.x, scrollInfo.y);
+                console.log(`[TikTok Search] ✅ Mouse positioned over comments`);
+                await new Promise(resolve => setTimeout(resolve, 1500)); // Increased wait time
+                
+                let loadedComments = 0;
+                let scrollAttempts = 0;
+                const maxScrollAttempts = 50;
+                let noChangeCount = 0;
+                
+                while (loadedComments < scrollInfo.totalComments && scrollAttempts < maxScrollAttempts) {
+                  scrollAttempts++;
+                  const beforeCount = loadedComments;
+                  
+                  // Use trusted Puppeteer mouse wheel event
+                  await page.mouse.wheel({ deltaY: 800 });
+                  await new Promise(resolve => setTimeout(resolve, 1500)); // Wait for lazy load
+                  
+                  loadedComments = await page.evaluate(() => {
+                    return document.querySelectorAll('[data-e2e="comment-level-1"]').length;
+                  });
+                  
+                  const increased = loadedComments > beforeCount;
+                  if (scrollAttempts % 5 === 0 || increased) {
+                    console.log(`[TikTok Search] 📊 Scroll ${scrollAttempts}: ${beforeCount} → ${loadedComments}/${scrollInfo.totalComments} comments ${increased ? '✅' : '⚠️'}`);
+                  }
+                  
+                  if (loadedComments >= scrollInfo.totalComments) {
+                    console.log(`[TikTok Search] ✅ All comments loaded!`);
+                    break;
+                  }
+                  
+                  // Stop if no progress after 3 consecutive attempts
+                  if (!increased) {
+                    noChangeCount++;
+                    if (noChangeCount >= 3) {
+                      console.log(`[TikTok Search] ⚠️ No new comments after ${noChangeCount} attempts`);
+                      break;
+                    }
+                  } else {
+                    noChangeCount = 0;
+                  }
+                }
+                
+                console.log(`[TikTok Search] ✅ Finished scrolling after ${scrollAttempts} attempts: loaded ${loadedComments} comments`);
+              } else {
+                console.log(`[TikTok Search] ❌ Could not find scrollable container`);
+              }
             } catch (scrollErr) {
               console.log(`[TikTok Search] ❌ Error scrolling comments:`, scrollErr);
             }
@@ -774,18 +917,26 @@ export async function searchTikTokByKeywords(
             
             posts.push(videoData);
             
-            // Go back to search results
-            await page.goBack();
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            // Navigate back to search results (don't use goBack - forces fresh load)
+            console.log(`[TikTok Search] Navigating back to search results for "${keyword}"...`);
+            await page.goto(`https://www.tiktok.com/search?q=${encodeURIComponent(keyword)}`, {
+              waitUntil: 'networkidle2',
+              timeout: 15000
+            }).catch(() => console.log('[TikTok Search] Navigation timeout, continuing...'));
+            await new Promise(resolve => setTimeout(resolve, 3000));
             
           } catch (videoError) {
-            console.error(`[TikTok Search] Error processing video ${videoIndex + 1}:`, videoError);
-            // Try to go back to search results if we're stuck
+            console.error(`[TikTok Search] Error processing video ${i + 1}:`, videoError);
+            // Navigate back to search results if we're stuck
             try {
-              await page.goBack();
-              await new Promise(resolve => setTimeout(resolve, 2000));
+              console.log(`[TikTok Search] Error recovery - navigating back to search results for "${keyword}"...`);
+              await page.goto(`https://www.tiktok.com/search?q=${encodeURIComponent(keyword)}`, {
+                waitUntil: 'networkidle2',
+                timeout: 15000
+              }).catch(() => console.log('[TikTok Search] Navigation timeout, continuing...'));
+              await new Promise(resolve => setTimeout(resolve, 3000));
             } catch (backError) {
-              console.error('[TikTok Search] Could not go back to search results');
+              console.error('[TikTok Search] Could not navigate back to search results');
             }
           }
         }
