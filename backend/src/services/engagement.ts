@@ -354,6 +354,12 @@ export async function tryToSendDM(
       return { success: false, error: 'Failed to click Send button' };
     }
     
+    // CRITICAL FIX: Count messages BEFORE sending to detect new message
+    const messageCountBeforeSend = await page.evaluate(() => {
+      return document.querySelectorAll('[data-e2e="chat-item"]').length;
+    });
+    console.log(`[Engagement] Message count before send: ${messageCountBeforeSend}`);
+    
     // Check if message failed to send (failure icon appears after sending)
     console.log(`[Engagement] Checking if message sent successfully...`);
     
@@ -361,29 +367,61 @@ export async function tryToSendDM(
     await new Promise(resolve => setTimeout(resolve, 3000));
     
     // Check for the dm-warning icon in the message that was just sent
-    const hasFailureIcon = await page.evaluate(() => {
+    const hasFailureIcon = await page.evaluate((beforeCount: number) => {
       // Find the most recent message (last chat item)
       const chatItems = document.querySelectorAll('[data-e2e="chat-item"]');
+      const afterCount = chatItems.length;
+      
+      console.log(`[Browser] Before: ${beforeCount}, After: ${afterCount}`);
+      
       if (chatItems.length === 0) {
-        return { found: false, visible: false, reason: 'No chat items found', chatItemCount: 0 };
+        return { found: false, visible: false, reason: 'No chat items found', chatItemCount: 0, beforeCount, afterCount };
       }
       
-      const lastMessage = chatItems[chatItems.length - 1];
-      const warningIcon = lastMessage.querySelector('[data-e2e="dm-warning"]');
-      
-      if (warningIcon) {
-        // Check if it's visible
-        const isVisible = (warningIcon as HTMLElement).offsetParent !== null;
+      // CRITICAL: Only check the LAST message if count increased (new message added)
+      // If count didn't increase, the message might not have been added yet (failure)
+      if (afterCount <= beforeCount) {
+        console.log(`[Browser] ⚠️ Message count did not increase - message may not have been added to thread`);
+        // Don't check for warning icon if no new message appeared
+        // This could mean the message is still sending or failed to add to thread
         return { 
-          found: true, 
-          visible: isVisible,
-          chatItemCount: chatItems.length,
-          reason: `Warning icon ${isVisible ? 'visible' : 'hidden'} in last message`
+          found: false, 
+          visible: false,
+          chatItemCount: afterCount,
+          beforeCount,
+          afterCount,
+          reason: 'Message count did not increase after send'
         };
       }
       
-      return { found: false, visible: false, chatItemCount: chatItems.length, reason: 'No warning icon in last message' };
-    });
+      const lastMessage = chatItems[chatItems.length - 1];
+      const warningContainer = lastMessage.querySelector('[data-e2e="dm-warning"]');
+      
+      if (warningContainer) {
+        // CRITICAL: The container exists in ALL messages, but only FAILED messages have an SVG child
+        const warningSvg = warningContainer.querySelector('svg');
+        const hasFailureSvg = !!warningSvg;
+        console.log(`[Browser] Warning container found, has SVG child: ${hasFailureSvg}`);
+        return { 
+          found: true, 
+          visible: hasFailureSvg,
+          chatItemCount: afterCount,
+          beforeCount,
+          afterCount,
+          reason: hasFailureSvg ? 'Failure SVG visible in warning container' : 'Warning container empty (success)'
+        };
+      }
+      
+      console.log(`[Browser] No warning container in last message`);
+      return { 
+        found: false, 
+        visible: false, 
+        chatItemCount: afterCount,
+        beforeCount,
+        afterCount,
+        reason: 'No warning container found' 
+      };
+    }, messageCountBeforeSend);
     
     console.log(`[Engagement] Failure icon check result:`, hasFailureIcon);
     
@@ -706,6 +744,8 @@ export async function postCommentReply(
       
       console.log(`[Browser] Searching ${comments.length} comments for @${username}...`);
       
+      const foundUsernames: string[] = []; // Track all found usernames for debugging
+      
       // Find the comment from this specific user
       for (let i = 0; i < comments.length; i++) {
         const comment = comments[i];
@@ -713,47 +753,45 @@ export async function postCommentReply(
         // Try multiple methods to find the username
         let commentUsername = '';
         
-        // Method 1: Look for username in data-e2e="comment-username-*" wrapper (most reliable)
-        const usernameWrapper = comment.querySelector('[data-e2e^="comment-username"]');
-        if (usernameWrapper) {
-          // Get the <a> or <p> tag inside the wrapper
-          const link = usernameWrapper.querySelector('a[href*="/@"]');
-          if (link) {
-            // Extract from href (most reliable): /@username -> username
-            const href = link.getAttribute('href') || '';
-            const match = href.match(/\/@([^/?]+)/);
-            if (match) {
-              commentUsername = match[1];
-            }
-            // Fallback: get text content
-            if (!commentUsername) {
-              commentUsername = link.textContent?.trim() || '';
-            }
+        // Method 1: Look for ANY <a> tag with href containing /@
+        const allLinks = comment.querySelectorAll('a[href*="/@"]');
+        if (allLinks.length > 0) {
+          // Get the FIRST link (should be the username link)
+          const firstLink = allLinks[0] as HTMLAnchorElement;
+          const href = firstLink.getAttribute('href') || '';
+          const match = href.match(/\/@([^/?]+)/);
+          if (match) {
+            commentUsername = match[1];
           }
         }
         
-        // Method 2: Direct link search (fallback)
+        // Method 2: Look for username in data-e2e="comment-username-*" wrapper (alternative)
         if (!commentUsername) {
-          const link = comment.querySelector('a[href*="/@"]');
-          if (link) {
-            const href = link.getAttribute('href') || '';
-            const match = href.match(/\/@([^/?]+)/);
-            if (match) {
-              commentUsername = match[1];
+          const usernameWrapper = comment.querySelector('[data-e2e^="comment-username"]');
+          if (usernameWrapper) {
+            const link = usernameWrapper.querySelector('a[href*="/@"]');
+            if (link) {
+              const href = link.getAttribute('href') || '';
+              const match = href.match(/\/@([^/?]+)/);
+              if (match) {
+                commentUsername = match[1];
+              }
             }
           }
         }
         
         // Clean up the username
-        commentUsername = commentUsername.replace('@', '').trim();
+        commentUsername = commentUsername.replace('@', '').trim().toLowerCase();
+        foundUsernames.push(commentUsername);
         
-        if (commentUsername && commentUsername.toLowerCase() === username.toLowerCase()) {
+        if (commentUsername && commentUsername === username.toLowerCase()) {
           console.log(`[Browser] ✅ Found @${username} at comment index ${i}`);
           return i; // Return the index of the matching comment
         }
       }
       
       console.log(`[Browser] ❌ Could not find @${username} in any of the ${comments.length} comments`);
+      console.log(`[Browser] 📋 Found usernames:`, foundUsernames.slice(0, 10).join(', '));
       return -1; // Not found
     }, targetUsername);
     
