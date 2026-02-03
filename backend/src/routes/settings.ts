@@ -14,6 +14,12 @@ router.get('/', authenticateToken, async (req: AuthRequest, res) => {
       [userId]
     );
 
+    // Get actions_per_session from first TikTok account (all accounts should have same value)
+    const [accountConfig]: any = await db.query(
+      'SELECT actions_per_session FROM tiktok_accounts WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+
     const [accounts]: any = await db.query(
       'SELECT id, account_identifier, is_active FROM tiktok_accounts WHERE user_id = ?',
       [userId]
@@ -25,7 +31,10 @@ router.get('/', authenticateToken, async (req: AuthRequest, res) => {
     );
 
     res.json({
-      config: config[0] || {},
+      config: {
+        ...(config[0] || {}),
+        actions_per_session: accountConfig[0]?.actions_per_session || 20
+      },
       accounts,
       automationEnabled: automation[0]?.automation_enabled || false
     });
@@ -39,7 +48,7 @@ router.get('/', authenticateToken, async (req: AuthRequest, res) => {
 router.put('/', authenticateToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.userId;
-    const { keywords, aiPrompt, exampleDM, exampleComment, openaiApiKey } = req.body;
+    const { keywords, aiPrompt, exampleDM, exampleComment, openaiApiKey, actionsPerSession } = req.body;
 
     await db.query(
       `UPDATE user_config 
@@ -47,6 +56,14 @@ router.put('/', authenticateToken, async (req: AuthRequest, res) => {
        WHERE user_id = ?`,
       [keywords, aiPrompt, exampleDM, exampleComment, openaiApiKey, userId]
     );
+
+    // Update actions_per_session for all user's TikTok accounts
+    if (actionsPerSession !== undefined) {
+      await db.query(
+        'UPDATE tiktok_accounts SET actions_per_session = ? WHERE user_id = ?',
+        [actionsPerSession, userId]
+      );
+    }
 
     res.json({ message: 'Settings updated successfully' });
   } catch (error) {

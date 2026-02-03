@@ -122,7 +122,8 @@ export async function searchTikTokByKeywords(
   keywords: string[], 
   keywordIndex: number = 0,
   userId?: number,
-  userConfig?: any
+  userConfig?: any,
+  getBrowserContextForAccount?: (account: any) => Promise<{ context: any, page: any }>
 ): Promise<{ posts: TikTokPost[], nextKeywordIndex: number }> {
   const connection = await db.getConnection();
   
@@ -155,7 +156,7 @@ export async function searchTikTokByKeywords(
       protocolTimeout: 120000 // 2 minutes
     });
     
-    const page = await browser.newPage();
+    let page = await browser.newPage();
     
     const foundPosts: TikTokPost[] = [];
     
@@ -998,6 +999,9 @@ export async function searchTikTokByKeywords(
                         });
                         
                         // Get or create context for new account
+                        if (!getBrowserContextForAccount) {
+                          throw new Error('getBrowserContextForAccount not available');
+                        }
                         const newCtx = await getBrowserContextForAccount(nextAccount);
                         page = newCtx.page;
                         currentAccountId = nextAccount.id;
@@ -1047,6 +1051,9 @@ export async function searchTikTokByKeywords(
                           });
                           
                           // Get or create context for new account
+                          if (!getBrowserContextForAccount) {
+                            throw new Error('getBrowserContextForAccount not available');
+                          }
                           const newCtx = await getBrowserContextForAccount(nextAccount);
                           page = newCtx.page;
                           currentAccountId = nextAccount.id;
@@ -1188,7 +1195,7 @@ async function getNextAvailableAccount(userId: number, currentAccountId: number)
          AND is_active = 1 
          AND (is_rate_limited = FALSE OR rate_limit_expires_at IS NULL OR rate_limit_expires_at < NOW())
        ORDER BY 
-         CASE WHEN id = ? THEN 1 ELSE 0 END,  -- Prefer different account
+         CASE WHEN id = ? THEN 0 ELSE 1 END DESC,  -- Prefer different account (0 = same, 1 = different, DESC = different first)
          last_used_at ASC,  -- Least recently used first
          id ASC
        LIMIT 1`,
@@ -1448,7 +1455,7 @@ export async function runTikTokSearchForAccounts(userId: number) {
       
       // NOTE: searchTikTokByKeywords will use 'page' and handle engagements with account rotation
       // The page variable may be reassigned during engagement if rotation occurs
-      const result = await searchTikTokByKeywords(currentAccountId, keywords, keywordIndex, userId, userConfig);
+      const result = await searchTikTokByKeywords(currentAccountId, keywords, keywordIndex, userId, userConfig, getBrowserContextForAccount);
         
       console.log(`[TikTok Search Worker] Extracted ${result.posts.length} posts, beginning database insert...`);
       

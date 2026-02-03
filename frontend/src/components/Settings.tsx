@@ -6,6 +6,7 @@ interface SettingsData {
   example_dm: string;
   example_comment: string;
   openai_api_key: string;
+  actions_per_session: number;
 }
 
 export default function Settings() {
@@ -14,7 +15,8 @@ export default function Settings() {
     ai_prompt: '',
     example_dm: '',
     example_comment: '',
-    openai_api_key: ''
+    openai_api_key: '',
+    actions_per_session: 20
   })
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -39,7 +41,8 @@ export default function Settings() {
           ai_prompt: data.config.ai_prompt || '',
           example_dm: data.config.example_dm || '',
           example_comment: data.config.example_comment || '',
-          openai_api_key: data.config.openai_api_key || ''
+          openai_api_key: data.config.openai_api_key || '',
+          actions_per_session: data.config.actions_per_session || 20
         })
       }
     } catch (error) {
@@ -68,7 +71,8 @@ export default function Settings() {
           aiPrompt: settings.ai_prompt,
           exampleDM: settings.example_dm,
           exampleComment: settings.example_comment,
-          openaiApiKey: settings.openai_api_key
+          openaiApiKey: settings.openai_api_key,
+          actionsPerSession: settings.actions_per_session
         })
       })
 
@@ -86,7 +90,7 @@ export default function Settings() {
     }
   }
 
-  const handleChange = (field: keyof SettingsData, value: string) => {
+  const handleChange = (field: keyof SettingsData, value: string | number) => {
     setSettings(prev => ({ ...prev, [field]: value }))
   }
 
@@ -168,6 +172,25 @@ export default function Settings() {
             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             required
           />
+        </div>
+
+        {/* Actions Per Session */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Send how many messages before changing accounts?
+          </label>
+          <input
+            type="number"
+            min="1"
+            max="100"
+            value={settings.actions_per_session}
+            onChange={(e) => handleChange('actions_per_session', parseInt(e.target.value) || 20)}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            required
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            After sending this many messages, the system will automatically switch to your next TikTok account
+          </p>
         </div>
 
         {/* OpenAI API Key */}

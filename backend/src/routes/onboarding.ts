@@ -159,7 +159,8 @@ router.post('/tiktok/complete', authenticateToken, async (req: AuthRequest, res)
         return res.status(404).json({ message: 'Account not found' });
       }
 
-      // Verify Chrome debug port is accessible
+      // Verify Chrome debug port is accessible and capture cookies
+      let capturedCookies: any[] = [];
       try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 3000);
@@ -171,16 +172,42 @@ router.post('/tiktok/complete', authenticateToken, async (req: AuthRequest, res)
           connection.release();
           return res.status(400).json({ message: 'Chrome debug port not accessible. Please launch Chrome using launch-chrome.bat' });
         }
+
+        // Now capture cookies from TikTok page
+        const puppeteer = await import('puppeteer-core');
+        const browser = await puppeteer.default.connect({
+          browserURL: 'http://127.0.0.1:9222'
+        });
+
+        // Get all pages and find TikTok
+        const pages = await browser.pages();
+        const tiktokPage = pages.find(p => p.url().includes('tiktok.com'));
+        
+        if (tiktokPage) {
+          // Capture all cookies from TikTok domain
+          capturedCookies = await tiktokPage.cookies();
+          console.log(`[Onboarding] Captured ${capturedCookies.length} cookies from TikTok for account ${accountId}`);
+        } else {
+          console.warn(`[Onboarding] No TikTok page found for account ${accountId}, cannot capture cookies`);
+        }
+
+        await browser.disconnect();
       } catch (err) {
         await connection.rollback();
         connection.release();
         return res.status(400).json({ message: 'Chrome not running in debug mode. Please launch Chrome using launch-chrome.bat' });
       }
 
-      // Mark account as ready
+      // Mark account as ready with captured cookies
+      const sessionData = {
+        type: 'local-chrome',
+        ready: true,
+        cookies: capturedCookies
+      };
+      
       await connection.query(
         'UPDATE tiktok_accounts SET session_data = ?, is_active = ?, last_checked = NOW() WHERE id = ?',
-        [JSON.stringify({ type: 'local-chrome', ready: true }), true, accountId]
+        [JSON.stringify(sessionData), true, accountId]
       );
 
       await connection.commit();
