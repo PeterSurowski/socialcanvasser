@@ -6,10 +6,14 @@ interface TikTokAccountsProps {
   onNext: () => void
 }
 
+type BrowserType = 'chrome_debug' | 'incogniton'
+
 export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAccountsProps) {
   const [showSetupModal, setShowSetupModal] = useState(false)
   const [currentAccountName, setCurrentAccountName] = useState('')
   const [currentAccountId, setCurrentAccountId] = useState<number | null>(null)
+  const [browserType, setBrowserType] = useState<BrowserType>('incogniton') // Default to Incogniton
+  const [incognitonProfileId, setIncognitonProfileId] = useState('')
   const [setupStep, setSetupStep] = useState<'instructions' | 'verify'>('instructions')
   const [isVerifying, setIsVerifying] = useState(false)
 
@@ -17,10 +21,16 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
     if (accounts.length >= 10) return
     setShowSetupModal(true)
     setSetupStep('instructions')
+    setBrowserType('incogniton') // Reset to default
+    setIncognitonProfileId('')
   }
 
   const handleStartSetup = async () => {
     if (!currentAccountName) return
+    if (browserType === 'incogniton' && !incognitonProfileId) {
+      alert('Please enter your Incogniton Profile ID')
+      return
+    }
 
     try {
       const token = localStorage.getItem('token')
@@ -30,7 +40,11 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`,
         },
-        body: JSON.stringify({ nickname: currentAccountName })
+        body: JSON.stringify({ 
+          nickname: currentAccountName,
+          browserType,
+          incognitonProfileId: browserType === 'incogniton' ? incognitonProfileId : undefined
+        })
       })
 
       if (!res.ok) {
@@ -39,7 +53,17 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
 
       const data = await res.json()
       setCurrentAccountId(data.accountId)
-      setSetupStep('verify')
+      
+      // For Incogniton accounts, skip verification step (already active)
+      if (data.isActive) {
+        onUpdate([...accounts, currentAccountName]) // Add to account list
+        setShowSetupModal(false)
+        setCurrentAccountName('')
+        setIncognitonProfileId('')
+      } else {
+        // Chrome Debug mode - needs verification
+        setSetupStep('verify')
+      }
     } catch (error) {
       console.error('Setup error:', error)
       alert('Failed to create account. Please try again.')
@@ -140,27 +164,113 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
                     />
                   </div>
 
-                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                    <h4 className="font-semibold text-blue-900 mb-2">📋 Instructions:</h4>
-                    <ol className="list-decimal list-inside space-y-2 text-sm text-blue-800">
-                      <li>Click "Start Setup" below</li>
-                      <li>Double-click <code className="bg-blue-100 px-2 py-1 rounded">launch-chrome.bat</code> in the socialcanvasser folder</li>
-                      <li>Close ANY existing Chrome windows first (the script will remind you)</li>
-                      <li>A new Chrome window will open with TikTok</li>
-                      <li>Log into your TikTok account normally</li>
-                      <li>Come back here and click "I'm Logged In"</li>
-                    </ol>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Browser Type
+                    </label>
+                    <div className="flex gap-3">
+                      <label className="flex-1 relative">
+                        <input
+                          type="radio"
+                          name="browserType"
+                          value="incogniton"
+                          checked={browserType === 'incogniton'}
+                          onChange={(e) => setBrowserType(e.target.value as BrowserType)}
+                          className="sr-only"
+                        />
+                        <div className={`p-4 border-2 rounded-lg cursor-pointer transition-all ${
+                          browserType === 'incogniton' 
+                            ? 'border-blue-500 bg-blue-50' 
+                            : 'border-gray-300 hover:border-gray-400'
+                        }`}>
+                          <div className="font-semibold text-gray-900">Incogniton</div>
+                          <div className="text-xs text-gray-600 mt-1">✅ Recommended - Automatic rotation</div>
+                        </div>
+                      </label>
+                      <label className="flex-1 relative">
+                        <input
+                          type="radio"
+                          name="browserType"
+                          value="chrome_debug"
+                          checked={browserType === 'chrome_debug'}
+                          onChange={(e) => setBrowserType(e.target.value as BrowserType)}
+                          className="sr-only"
+                        />
+                        <div className={`p-4 border-2 rounded-lg cursor-pointer transition-all ${
+                          browserType === 'chrome_debug' 
+                            ? 'border-blue-500 bg-blue-50' 
+                            : 'border-gray-300 hover:border-gray-400'
+                        }`}>
+                          <div className="font-semibold text-gray-900">Chrome Debug</div>
+                          <div className="text-xs text-gray-600 mt-1">Legacy - Manual rotation required</div>
+                        </div>
+                      </label>
+                    </div>
                   </div>
 
-                  <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-                    <h4 className="font-semibold text-yellow-900 mb-2">⚠️ Important:</h4>
-                    <ul className="list-disc list-inside space-y-1 text-sm text-yellow-800">
-                      <li>Keep the Chrome window open while using SocialCanvasser</li>
-                      <li>Don't close the terminal window that appears</li>
-                      <li>This Chrome is running in "debug mode" so the app can automate it</li>
-                      <li>Your real IP and browser profile = much harder for TikTok to detect!</li>
-                    </ul>
-                  </div>
+                  {browserType === 'incogniton' ? (
+                    <>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Incogniton Profile ID
+                        </label>
+                        <input
+                          type="text"
+                          value={incognitonProfileId}
+                          onChange={(e) => setIncognitonProfileId(e.target.value)}
+                          placeholder="e.g., 507f1f77bcf86cd799439011"
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                        />
+                      </div>
+
+                      <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                        <h4 className="font-semibold text-blue-900 mb-2">📋 Incogniton Setup:</h4>
+                        <ol className="list-decimal list-inside space-y-2 text-sm text-blue-800">
+                          <li>Open the <strong>Incogniton desktop app</strong> (must be running)</li>
+                          <li>Create a new profile or select existing one</li>
+                          <li><strong>Copy the Profile ID</strong> from profile details</li>
+                          <li>Paste the Profile ID above</li>
+                          <li>Click "Start Profile" in Incogniton</li>
+                          <li>Log into TikTok in the browser that opens</li>
+                          <li>Come back here and click "Profile Ready"</li>
+                        </ol>
+                      </div>
+
+                      <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                        <h4 className="font-semibold text-green-900 mb-2">✅ Benefits:</h4>
+                        <ul className="list-disc list-inside space-y-1 text-sm text-green-800">
+                          <li><strong>Automatic account switching</strong> when action limit reached</li>
+                          <li>Session persists between automation runs (no re-login)</li>
+                          <li>Professional anti-detection browser profiles</li>
+                          <li>No manual Chrome restarts needed</li>
+                        </ul>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                        <h4 className="font-semibold text-blue-900 mb-2">📋 Chrome Debug Instructions:</h4>
+                        <ol className="list-decimal list-inside space-y-2 text-sm text-blue-800">
+                          <li>Click "Start Setup" below</li>
+                          <li>Double-click <code className="bg-blue-100 px-2 py-1 rounded">launch-chrome.bat</code> in the socialcanvasser folder</li>
+                          <li>Close ANY existing Chrome windows first (the script will remind you)</li>
+                          <li>A new Chrome window will open with TikTok</li>
+                          <li>Log into your TikTok account normally</li>
+                          <li>Come back here and click "I'm Logged In"</li>
+                        </ol>
+                      </div>
+
+                      <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                        <h4 className="font-semibold text-yellow-900 mb-2">⚠️ Important:</h4>
+                        <ul className="list-disc list-inside space-y-1 text-sm text-yellow-800">
+                          <li>Keep the Chrome window open while using SocialCanvasser</li>
+                          <li>Don't close the terminal window that appears</li>
+                          <li>This Chrome is running in "debug mode" so the app can automate it</li>
+                          <li>Manual account rotation required (close/relaunch Chrome)</li>
+                        </ul>
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 <div className="flex gap-3">
@@ -168,6 +278,7 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
                     onClick={() => {
                       setShowSetupModal(false)
                       setCurrentAccountName('')
+                      setIncognitonProfileId('')
                     }}
                     className="flex-1 py-2 px-4 border border-gray-300 rounded-lg hover:bg-gray-50"
                   >
@@ -175,10 +286,10 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
                   </button>
                   <button
                     onClick={handleStartSetup}
-                    disabled={!currentAccountName}
+                    disabled={!currentAccountName || (browserType === 'incogniton' && !incognitonProfileId)}
                     className="flex-1 py-2 px-4 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
                   >
-                    Start Setup
+                    {browserType === 'incogniton' ? 'Profile Ready' : 'Start Setup'}
                   </button>
                 </div>
               </>

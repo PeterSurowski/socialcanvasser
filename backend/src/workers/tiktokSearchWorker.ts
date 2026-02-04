@@ -3,6 +3,7 @@ import db from '../config/database.js';
 import { sendUserEvent } from '../events/broadcaster.js';
 import { analyzeCommentsForBuyingIntent } from '../services/openai.js';
 import { engageWithUser } from '../services/engagement.js';
+import { connectBrowserForAccount, closeBrowserConnection, switchToAccount, type BrowserConnection, type TikTokAccount } from '../services/browserManager.js';
 
 interface TikTokPost {
   username: string;
@@ -123,7 +124,8 @@ export async function searchTikTokByKeywords(
   keywordIndex: number = 0,
   userId?: number,
   userConfig?: any,
-  getBrowserContextForAccount?: (account: any) => Promise<{ context: any, page: any }>
+  getBrowserContextForAccount?: (account: any) => Promise<{ context: any, page: any }>,
+  existingPage?: any
 ): Promise<{ posts: TikTokPost[], nextKeywordIndex: number }> {
   const connection = await db.getConnection();
   
@@ -131,9 +133,9 @@ export async function searchTikTokByKeywords(
     // PHASE 3: Track current account (may change during rotation)
     let currentAccountId = accountId;
     
-    // Get account session info
+    // Get account info (including browser type and profile)
     const [rows] = await connection.query(
-      'SELECT session_data FROM tiktok_accounts WHERE id = ? AND is_active = 1 LIMIT 1',
+      'SELECT id, account_identifier, browser_type, incogniton_profile_id, session_data FROM tiktok_accounts WHERE id = ? AND is_active = 1 LIMIT 1',
       [accountId]
     );
     
@@ -141,22 +143,28 @@ export async function searchTikTokByKeywords(
       throw new Error(`Account ${accountId} not found or inactive`);
     }
     
-    const sessionData = JSON.parse((rows as any[])[0].session_data || '{}');
+    const account = (rows as any[])[0] as TikTokAccount;
+    const sessionData = JSON.parse(account.session_data || '{}');
     
-    // Verify Chrome is running
-    if (!sessionData.ready) {
+    // Verify Chrome is running (for legacy chrome_debug mode only)
+    if (account.browser_type === 'chrome_debug' && !sessionData.ready) {
       throw new Error(`Account ${accountId} not ready - user must launch Chrome and login first`);
     }
     
-    // Connect to local Chrome (always on port 9222)
-    console.log(`[TikTok Search] Connecting to local Chrome for account ${accountId}`);
+    // Use existing page if provided, otherwise connect to browser
+    let page: any;
+    let browserConnection: any = null;
+    let shouldCloseBrowser = false;
     
-    const browser = await puppeteer.connect({
-      browserURL: 'http://127.0.0.1:9222',
-      protocolTimeout: 120000 // 2 minutes
-    });
-    
-    let page = await browser.newPage();
+    if (existingPage) {
+      console.log(`[TikTok Search] Using existing page for account ${accountId}`);
+      page = existingPage;
+    } else {
+      console.log(`[TikTok Search] Connecting browser for account ${accountId} (${account.browser_type})...`);
+      browserConnection = await connectBrowserForAccount(account);
+      page = browserConnection.page;
+      shouldCloseBrowser = true; // We opened it, so we should close it
+    }
     
     const foundPosts: TikTokPost[] = [];
     
@@ -375,7 +383,7 @@ export async function searchTikTokByKeywords(
         });
       } catch (evalError) {
         console.log(`[TikTok Search] Could not evaluate page for keyword: ${keyword} - page may be unresponsive`);
-        await browser.disconnect();
+        await closeBrowserConnection(browserConnection);
         return { posts: [], nextKeywordIndex };
       }
       
@@ -1043,26 +1051,50 @@ export async function searchTikTokByKeywords(
                         const nextAccount = await getNextAvailableAccount(userId, currentAccountId);
                         
                         if (nextAccount) {
-                          console.log(`[Account Rotation] 🔄 Action limit reached, switching to account ${nextAccount.id} (@${nextAccount.account_identifier})`);
+                          console.log(`[Account Rotation] ⚠️ Action limit reached for account ${currentAccountId}`);
+                          console.log(`[Account Rotation] 🔄 Switching to account ${nextAccount.id} (@${nextAccount.account_identifier})...`);
                           
                           sendUserEvent(userId, {
-                            type: 'info',
-                            text: `🔄 Switching to account @${nextAccount.account_identifier} (${rotationCheck.currentActions} actions completed)`
+                            type: 'warning',
+                            text: `⚠️ Action limit reached (${rotationCheck.currentActions} actions). Switching to next account...`
                           });
                           
-                          // Get or create context for new account
-                          if (!getBrowserContextForAccount) {
-                            throw new Error('getBrowserContextForAccount not available');
+                          try {
+                            // Get next account's full configuration
+                            const [nextAccountRows] = await connection.query(
+                              'SELECT id, account_id, browser_type, incogniton_profile_id, session_data FROM tiktok_accounts WHERE id = ?',
+                              [nextAccount.id]
+                            );
+                            
+                            const nextAccountConfig = (nextAccountRows as any[])[0] as TikTokAccount;
+                            
+                            // Switch browser connection to next account
+                            browserConnection = await switchToAccount(browserConnection, nextAccountConfig);
+                            page = browserConnection.page;
+                            
+                            // Update current account ID
+                            currentAccountId = nextAccount.id;
+                            currentAccount = nextAccount;
+                            
+                            console.log(`[Account Rotation] ✅ Successfully switched to account ${nextAccount.id}`);
+                            sendUserEvent(userId, {
+                              type: 'success',
+                              text: `✅ Switched to account @${nextAccount.account_identifier}`
+                            });
+                            
+                            // Continue with engagement loop
+                          } catch (switchError) {
+                            console.error(`[Account Rotation] ❌ Failed to switch accounts:`, switchError);
+                            sendUserEvent(userId, {
+                              type: 'error',
+                              text: `❌ Failed to switch accounts: ${switchError instanceof Error ? switchError.message : 'Unknown error'}`
+                            });
+                            
+                            // Exit gracefully if switch fails
+                            return;
                           }
-                          const newCtx = await getBrowserContextForAccount(nextAccount);
-                          page = newCtx.page;
-                          currentAccountId = nextAccount.id;
-                          currentAccount = nextAccount;
-                          
-                          // Reset action counter for new account
-                          await resetActionCounter(currentAccountId);
                         } else {
-                          console.log(`[Account Rotation] ⚠️ No more available accounts for rotation - all snoozed`);
+                          console.log(`[Account Rotation] ⚠️ No more available accounts for rotation - all exhausted`);
                           sendUserEvent(userId, {
                             type: 'warning',
                             text: `⚠️ All accounts exhausted - pausing automation`
@@ -1394,53 +1426,23 @@ export async function runTikTokSearchForAccounts(userId: number) {
     console.log(`[TikTok Search Worker] Starting with account ${currentAccount.id} (@${currentAccount.account_identifier})`);
     console.log(`[TikTok Search Worker] Action limit: ${currentAccount.actions_per_session} actions per session`);
     
-    // Create browser contexts for multi-account support
-    // Note: We'll connect to the shared Chrome instance and create contexts as needed
-    let browser: any = null;
-    const contextMap = new Map<number, { context: any; page: any }>();
+    // Get account info with browser configuration
+    const [accountRows] = await connection.query(
+      'SELECT id, account_identifier, browser_type, incogniton_profile_id, session_data FROM tiktok_accounts WHERE id = ?',
+      [currentAccount.id]
+    );
+    
+    const account = (accountRows as any[])[0] as TikTokAccount;
+    
+    // PHASE 4: Use browser manager for connections (supports both Chrome Debug and Incogniton)
+    let browserConnection: BrowserConnection | null = null;
     
     try {
-      // Connect to shared Chrome instance
-      browser = await puppeteer.connect({
-        browserURL: 'http://127.0.0.1:9222',
-        protocolTimeout: 120000
-      });
-      
-      console.log(`[TikTok Search Worker] Connected to Chrome, creating browser context for account ${currentAccount.id}...`);
-      
-      // PHASE 3: Function to get or create browser context for an account
-      const getBrowserContextForAccount = async (account: any) => {
-        if (contextMap.has(account.id)) {
-          console.log(`[Account Rotation] ♻️ Reusing existing context for account ${account.id}`);
-          return contextMap.get(account.id)!;
-        }
-        
-        console.log(`[Account Rotation] 🆕 Creating new browser context for account ${account.id}...`);
-        
-        // Create isolated browser context (separate cookies, cache, etc.)
-        const context = await browser.createBrowserContext();
-        const page = await context.newPage();
-        
-        // Load account-specific cookies
-        if (account.session_data) {
-          try {
-            const sessionData = JSON.parse(account.session_data);
-            if (sessionData.cookies && Array.isArray(sessionData.cookies)) {
-              await page.setCookie(...sessionData.cookies);
-              console.log(`[Account Rotation] 🍪 Loaded ${sessionData.cookies.length} cookies for account ${account.id}`);
-            }
-          } catch (cookieError) {
-            console.error(`[Account Rotation] ⚠️ Failed to load cookies for account ${account.id}:`, cookieError);
-          }
-        }
-        
-        const ctx = { context, page };
-        contextMap.set(account.id, ctx);
-        return ctx;
-      };
-      
-      // Get initial context
-      let { page } = await getBrowserContextForAccount(currentAccount);
+      // Connect to browser using appropriate method
+      console.log(`[TikTok Search Worker] Connecting browser for account ${account.id} (${account.browser_type})...`);
+      browserConnection = await connectBrowserForAccount(account);
+      const browser = browserConnection.browser;
+      let page = browserConnection.page;
       let currentAccountId = currentAccount.id;
       
       // Search for ONE keyword, but use account rotation for engagements
@@ -1453,9 +1455,27 @@ export async function runTikTokSearchForAccounts(userId: number) {
         text: `Searching for "${keyword}" with @${currentAccount.account_identifier}...` 
       });
       
-      // NOTE: searchTikTokByKeywords will use 'page' and handle engagements with account rotation
+      // Define callback for account rotation (if needed during engagement phase)
+      const getBrowserContextForAccount = async (nextAccount: any) => {
+        console.log(`[Account Rotation] Switching to account ${nextAccount.id} (@${nextAccount.account_identifier})...`);
+        
+        // Close current browser connection
+        if (browserConnection) {
+          await closeBrowserConnection(browserConnection);
+        }
+        
+        // Connect to new account's browser
+        browserConnection = await connectBrowserForAccount(nextAccount);
+        
+        return {
+          context: null, // Not used in Phase 4
+          page: browserConnection.page
+        };
+      };
+      
+      // NOTE: searchTikTokByKeywords will use the existing page and handle engagements with account rotation
       // The page variable may be reassigned during engagement if rotation occurs
-      const result = await searchTikTokByKeywords(currentAccountId, keywords, keywordIndex, userId, userConfig, getBrowserContextForAccount);
+      const result = await searchTikTokByKeywords(currentAccountId, keywords, keywordIndex, userId, userConfig, getBrowserContextForAccount, page);
         
       console.log(`[TikTok Search Worker] Extracted ${result.posts.length} posts, beginning database insert...`);
       
@@ -1609,24 +1629,13 @@ export async function runTikTokSearchForAccounts(userId: number) {
         });
       }
     } finally {
-      // PHASE 3: Clean up all browser contexts
-      console.log(`[TikTok Search Worker] Cleaning up ${contextMap.size} browser contexts...`);
-      for (const [accountId, ctx] of contextMap.entries()) {
+      // PHASE 4: Clean up browser connection
+      if (browserConnection) {
         try {
-          await ctx.context.close();
-          console.log(`[TikTok Search Worker] ✅ Closed context for account ${accountId}`);
+          await closeBrowserConnection(browserConnection);
+          console.log(`[TikTok Search Worker] ✅ Browser connection closed`);
         } catch (closeError) {
-          console.error(`[TikTok Search Worker] ⚠️ Error closing context for account ${accountId}:`, closeError);
-        }
-      }
-      
-      // Disconnect from browser
-      if (browser) {
-        try {
-          await browser.disconnect();
-          console.log(`[TikTok Search Worker] ✅ Disconnected from Chrome`);
-        } catch (disconnectError) {
-          console.error(`[TikTok Search Worker] ⚠️ Error disconnecting from browser:`, disconnectError);
+          console.error(`[TikTok Search Worker] ⚠️ Error closing browser connection:`, closeError);
         }
       }
       

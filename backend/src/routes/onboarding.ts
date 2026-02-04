@@ -82,12 +82,18 @@ router.post('/complete', authenticateToken, async (req: AuthRequest, res) => {
   }
 });
 
-// Create a TikTok account record (user will launch Chrome manually)
+// Create a TikTok account record (supports both Chrome Debug and Incogniton)
 router.post('/tiktok/connect', authenticateToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.userId;
-    const { nickname } = req.body;
+    const { nickname, browserType, incognitonProfileId } = req.body;
+    
     if (!nickname) return res.status(400).json({ message: 'Nickname required' });
+    
+    // Validate Incogniton requirements
+    if (browserType === 'incogniton' && !incognitonProfileId) {
+      return res.status(400).json({ message: 'Incogniton Profile ID required' });
+    }
 
     const connection = await db.getConnection();
     await connection.beginTransaction();
@@ -103,27 +109,39 @@ router.post('/tiktok/connect', authenticateToken, async (req: AuthRequest, res) 
         connection.release();
         console.log(`[Onboarding] Account "${nickname}" already exists for user ${userId}, returning existing ID`);
         // Return existing account instead of creating duplicate
+        const isActive = browserType === 'incogniton';
         return res.json({ 
           message: 'Account already exists', 
           accountId: (existing[0] as any).id,
-          launchCommand: 'launch-chrome.bat'
+          browserType: browserType || 'chrome_debug',
+          isActive,
+          launchCommand: browserType === 'incogniton' ? null : 'launch-chrome.bat'
         });
       }
       
+      // For Incogniton accounts, mark as active immediately (no verification needed)
+      const isActive = browserType === 'incogniton';
+      const sessionData = browserType === 'incogniton' 
+        ? { type: 'incogniton', profileId: incognitonProfileId, ready: true }
+        : { type: 'local-chrome', ready: false };
+      
       const [result] = await connection.query(
-        'INSERT INTO tiktok_accounts (user_id, account_identifier, is_active, session_data) VALUES (?, ?, ?, ?)',
-        [userId, nickname, false, JSON.stringify({ type: 'local-chrome', ready: false })]
+        'INSERT INTO tiktok_accounts (user_id, account_identifier, browser_type, incogniton_profile_id, is_active, session_data) VALUES (?, ?, ?, ?, ?, ?)',
+        [userId, nickname, browserType || 'chrome_debug', incognitonProfileId || null, isActive, JSON.stringify(sessionData)]
       );
 
       await connection.commit();
       connection.release();
 
       const accountId = (result as any).insertId;
-      console.log(`[Onboarding] Created new account "${nickname}" (ID: ${accountId}) for user ${userId}`);
+      console.log(`[Onboarding] Created new ${browserType || 'chrome_debug'} account "${nickname}" (ID: ${accountId}) for user ${userId}`);
+      
       return res.json({ 
         message: 'Account created', 
         accountId,
-        launchCommand: 'launch-chrome.bat' // User will run this
+        browserType: browserType || 'chrome_debug',
+        isActive,
+        launchCommand: browserType === 'incogniton' ? null : 'launch-chrome.bat'
       });
     } catch (err) {
       await connection.rollback();

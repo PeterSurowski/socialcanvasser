@@ -154,21 +154,31 @@ router.post('/start', async (req: any, res) => {
     const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret')
     const userId = decoded.userId
 
-    // Check if Chrome is accessible first
-    try {
-      const response = await fetch('http://localhost:9222/json/version');
-      if (!response.ok) {
-        throw new Error('Chrome not accessible');
+    // Check if user has any Chrome Debug accounts that need verification
+    const [accounts]: any = await db.query(
+      'SELECT browser_type FROM tiktok_accounts WHERE user_id = ? AND is_active = 1',
+      [userId]
+    );
+    
+    const hasChromeDebugAccounts = accounts.some((acc: any) => acc.browser_type === 'chrome_debug');
+    
+    if (hasChromeDebugAccounts) {
+      // Only check Chrome Debug port if user has Chrome Debug accounts
+      try {
+        const response = await fetch('http://localhost:9222/json/version');
+        if (!response.ok) {
+          throw new Error('Chrome not accessible');
+        }
+      } catch (err) {
+        console.error('[Dashboard] Chrome not accessible:', err);
+        sendUserEvent(userId, { 
+          type: 'error', 
+          text: '❌ Chrome not running! Please run launch-chrome.bat first.' 
+        });
+        return res.status(400).json({ 
+          message: 'Chrome not running. Please run launch-chrome.bat first.' 
+        });
       }
-    } catch (err) {
-      console.error('[Dashboard] Chrome not accessible:', err);
-      sendUserEvent(userId, { 
-        type: 'error', 
-        text: '❌ Chrome not running! Please run launch-chrome.bat first.' 
-      });
-      return res.status(400).json({ 
-        message: 'Chrome not running. Please run launch-chrome.bat first.' 
-      });
     }
 
     await db.query('INSERT INTO automation_state (user_id, is_running) VALUES (?, ?) ON DUPLICATE KEY UPDATE is_running = VALUES(is_running)', [userId, true])
