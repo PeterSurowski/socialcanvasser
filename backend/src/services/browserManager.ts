@@ -200,9 +200,22 @@ async function connectIncogniton(profileId: string): Promise<BrowserConnection> 
       page = await browser.newPage();
       console.log('[BrowserManager] Created new page in Incogniton browser');
     } else {
+      // Close all extra pages except the first one to avoid multiple windows
+      if (pages.length > 1) {
+        console.log(`[BrowserManager] Closing ${pages.length - 1} extra tabs...`);
+        for (let i = 1; i < pages.length; i++) {
+          await pages[i].close();
+        }
+      }
       page = pages[0];
       console.log('[BrowserManager] Using existing page from Incogniton browser');
     }
+    
+    // Note: To set browser window width, configure it in the Incogniton profile settings:
+    // 1. Open Incogniton app
+    // 2. Edit your profile
+    // 3. Advanced Settings > Screen Resolution
+    // 4. Set width to 800px
     
     return {
       browser,

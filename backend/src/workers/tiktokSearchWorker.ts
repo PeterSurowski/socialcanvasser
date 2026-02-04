@@ -176,13 +176,34 @@ export async function searchTikTokByKeywords(
     console.log(`[TikTok Search] Searching for keyword: "${keyword}" (index ${keywordIndex}/${keywords.length - 1})`);
     
     try {
-      // Navigate to TikTok search first
+      // First, check current page URL
+      const currentUrl = page.url();
+      console.log(`[TikTok Search] Current page URL before navigation: ${currentUrl}`);
+      
+      // Navigate to TikTok search
       const searchUrl = `https://www.tiktok.com/search?q=${encodeURIComponent(keyword)}`;
       console.log(`[TikTok Search] Navigating to: ${searchUrl}`);
-      await page.goto(searchUrl, {
-        waitUntil: 'networkidle2',
-        timeout: 30000
-      });
+      
+      try {
+        await page.goto(searchUrl, {
+          waitUntil: 'domcontentloaded', // Less strict than networkidle2
+          timeout: 60000 // Increase timeout to 60 seconds
+        });
+        console.log(`[TikTok Search] Navigation successful`);
+      } catch (gotoError) {
+        console.error(`[TikTok Search] Navigation failed:`, gotoError);
+        // Try alternative navigation method
+        console.log(`[TikTok Search] Trying alternative navigation method...`);
+        await page.evaluate((url) => {
+          window.location.href = url;
+        }, searchUrl);
+        await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {
+          console.log(`[TikTok Search] Alternative navigation also timed out, checking page state...`);
+        });
+      }
+      
+      // Wait a moment for page to settle
+      await new Promise(resolve => setTimeout(resolve, 3000));
       
       // Now clear TikTok's cache/state to prevent cached search results
       console.log(`[TikTok Search] Clearing TikTok cache for fresh results...`);
@@ -196,12 +217,12 @@ export async function searchTikTokByKeywords(
       const freshUrl = `https://www.tiktok.com/search?q=${encodeURIComponent(keyword)}&t=${timestamp}`;
       console.log(`[TikTok Search] Reloading with cache-buster: ${freshUrl}`);
       await page.goto(freshUrl, {
-        waitUntil: 'networkidle2',
-        timeout: 30000
+        waitUntil: 'domcontentloaded',
+        timeout: 60000
       });
       
     } catch (navError) {
-      console.log(`[TikTok Search] Navigation timeout for keyword: ${keyword}, continuing...`);
+      console.error(`[TikTok Search] Navigation error for keyword: ${keyword}`, navError);
       // Continue anyway, page might have loaded partially
     }
       
