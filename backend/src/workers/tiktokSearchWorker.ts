@@ -1072,6 +1072,24 @@ export async function searchTikTokByKeywords(
                         const nextAccount = await getNextAvailableAccount(userId, currentAccountId);
                         
                         if (nextAccount) {
+                          // Check if it's the same account (only one account available)
+                          if (nextAccount.id === currentAccountId) {
+                            console.log(`[Account Rotation] ⚠️ Only one account available - resetting action counter`);
+                            sendUserEvent(userId, {
+                              type: 'info',
+                              text: `⚠️ Action limit reached. Only one account available - continuing...`
+                            });
+                            
+                            // Reset action counter for this account to continue
+                            await connection.query(
+                              'UPDATE tiktok_accounts SET current_session_actions = 0 WHERE id = ?',
+                              [currentAccountId]
+                            );
+                            
+                            // Continue with next engagement in the loop
+                            continue;
+                          }
+                          
                           console.log(`[Account Rotation] ⚠️ Action limit reached for account ${currentAccountId}`);
                           console.log(`[Account Rotation] 🔄 Switching to account ${nextAccount.id} (@${nextAccount.account_identifier})...`);
                           
@@ -1083,7 +1101,7 @@ export async function searchTikTokByKeywords(
                           try {
                             // Get next account's full configuration
                             const [nextAccountRows] = await connection.query(
-                              'SELECT id, account_id, browser_type, incogniton_profile_id, session_data FROM tiktok_accounts WHERE id = ?',
+                              'SELECT id, account_identifier, browser_type, incogniton_profile_id, session_data FROM tiktok_accounts WHERE id = ?',
                               [nextAccount.id]
                             );
                             
@@ -1093,9 +1111,9 @@ export async function searchTikTokByKeywords(
                             browserConnection = await switchToAccount(browserConnection, nextAccountConfig);
                             page = browserConnection.page;
                             
-                            // Update current account ID
+                            // Update current account ID for this search session
                             currentAccountId = nextAccount.id;
-                            currentAccount = nextAccount;
+                            // Note: currentAccount is in outer scope, will be updated after search completes
                             
                             console.log(`[Account Rotation] ✅ Successfully switched to account ${nextAccount.id}`);
                             sendUserEvent(userId, {
@@ -1107,7 +1125,7 @@ export async function searchTikTokByKeywords(
                           } catch (switchError) {
                             console.error(`[Account Rotation] ❌ Failed to switch accounts:`, switchError);
                             sendUserEvent(userId, {
-                              type: 'error',
+                            type: 'error',
                               text: `❌ Failed to switch accounts: ${switchError instanceof Error ? switchError.message : 'Unknown error'}`
                             });
                             
@@ -1248,7 +1266,7 @@ async function getNextAvailableAccount(userId: number, currentAccountId: number)
          AND is_active = 1 
          AND (is_rate_limited = FALSE OR rate_limit_expires_at IS NULL OR rate_limit_expires_at < NOW())
        ORDER BY 
-         CASE WHEN id = ? THEN 0 ELSE 1 END DESC,  -- Prefer different account (0 = same, 1 = different, DESC = different first)
+         CASE WHEN id = ? THEN 0 ELSE 1 END DESC,  -- Prefer different account (1=different comes first with DESC)
          last_used_at ASC,  -- Least recently used first
          id ASC
        LIMIT 1`,
@@ -1444,59 +1462,61 @@ export async function runTikTokSearchForAccounts(userId: number) {
       return;
     }
     
-    console.log(`[TikTok Search Worker] Starting with account ${currentAccount.id} (@${currentAccount.account_identifier})`);
-    console.log(`[TikTok Search Worker] Action limit: ${currentAccount.actions_per_session} actions per session`);
-    
-    // Get account info with browser configuration
-    const [accountRows] = await connection.query(
-      'SELECT id, account_identifier, browser_type, incogniton_profile_id, session_data FROM tiktok_accounts WHERE id = ?',
-      [currentAccount.id]
-    );
-    
-    const account = (accountRows as any[])[0] as TikTokAccount;
-    
-    // PHASE 4: Use browser manager for connections (supports both Chrome Debug and Incogniton)
-    let browserConnection: BrowserConnection | null = null;
-    
-    try {
-      // Connect to browser using appropriate method
-      console.log(`[TikTok Search Worker] Connecting browser for account ${account.id} (${account.browser_type})...`);
-      browserConnection = await connectBrowserForAccount(account);
-      const browser = browserConnection.browser;
-      let page = browserConnection.page;
-      let currentAccountId = currentAccount.id;
+    // ACCOUNT ROTATION LOOP: Continue searching with different accounts until all exhausted
+    while (currentAccount) {
+      console.log(`[TikTok Search Worker] Starting with account ${currentAccount.id} (@${currentAccount.account_identifier})`);
+      console.log(`[TikTok Search Worker] Action limit: ${currentAccount.actions_per_session} actions per session`);
       
-      // Search for ONE keyword, but use account rotation for engagements
-      const keywordIndex = currentAccount.last_keyword_index || 0;
-      const keyword = keywords[keywordIndex];
+      // Get account info with browser configuration
+      const [accountRows] = await connection.query(
+        'SELECT id, account_identifier, browser_type, incogniton_profile_id, session_data FROM tiktok_accounts WHERE id = ?',
+        [currentAccount.id]
+      );
       
-      // Send live feed event: searching
-      sendUserEvent(userId, { 
-        type: 'info', 
-        text: `Searching for "${keyword}" with @${currentAccount.account_identifier}...` 
-      });
+      const account = (accountRows as any[])[0] as TikTokAccount;
       
-      // Define callback for account rotation (if needed during engagement phase)
-      const getBrowserContextForAccount = async (nextAccount: any) => {
-        console.log(`[Account Rotation] Switching to account ${nextAccount.id} (@${nextAccount.account_identifier})...`);
+      // PHASE 4: Use browser manager for connections (supports both Chrome Debug and Incogniton)
+      let browserConnection: BrowserConnection | null = null;
+      
+      try {
+        // Connect to browser using appropriate method
+        console.log(`[TikTok Search Worker] Connecting browser for account ${account.id} (${account.browser_type})...`);
+        browserConnection = await connectBrowserForAccount(account);
+        const browser = browserConnection.browser;
+        let page = browserConnection.page;
+        let currentAccountId = currentAccount.id;
         
-        // Close current browser connection
-        if (browserConnection) {
-          await closeBrowserConnection(browserConnection);
-        }
+        // Search for ONE keyword, but use account rotation for engagements
+        const keywordIndex = currentAccount.last_keyword_index || 0;
+        const keyword = keywords[keywordIndex];
         
-        // Connect to new account's browser
-        browserConnection = await connectBrowserForAccount(nextAccount);
+        // Send live feed event: searching
+        sendUserEvent(userId, { 
+          type: 'info', 
+          text: `Searching for "${keyword}" with @${currentAccount.account_identifier}...` 
+        });
         
-        return {
-          context: null, // Not used in Phase 4
-          page: browserConnection.page
+        // Define callback for account rotation (if needed during engagement phase)
+        const getBrowserContextForAccount = async (nextAccount: any) => {
+          console.log(`[Account Rotation] Switching to account ${nextAccount.id} (@${nextAccount.account_identifier})...`);
+          
+          // Close current browser connection
+          if (browserConnection) {
+            await closeBrowserConnection(browserConnection);
+          }
+          
+          // Connect to new account's browser
+          browserConnection = await connectBrowserForAccount(nextAccount);
+          
+          return {
+            context: null, // Not used in Phase 4
+            page: browserConnection.page
+          };
         };
-      };
-      
-      // NOTE: searchTikTokByKeywords will use the existing page and handle engagements with account rotation
-      // The page variable may be reassigned during engagement if rotation occurs
-      const result = await searchTikTokByKeywords(currentAccountId, keywords, keywordIndex, userId, userConfig, getBrowserContextForAccount, page);
+        
+        // NOTE: searchTikTokByKeywords will use the existing page and handle engagements with account rotation
+        // The page variable may be reassigned during engagement if rotation occurs
+        const result = await searchTikTokByKeywords(currentAccountId, keywords, keywordIndex, userId, userConfig, getBrowserContextForAccount, page);
         
       console.log(`[TikTok Search Worker] Extracted ${result.posts.length} posts, beginning database insert...`);
       
@@ -1621,13 +1641,27 @@ export async function runTikTokSearchForAccounts(userId: number) {
         }
       }
       
-      console.log('[TikTok Search Worker] Search completed');
+      console.log('[TikTok Search Worker] Search completed for this account');
       
-      // Send completion message
-      sendUserEvent(userId, { 
-        type: 'info', 
-        text: '✅ Search completed' 
-      });
+      // ACCOUNT ROTATION: Get next available account and continue if any remain
+      const nextAccount = await getNextAvailableAccount(userId, currentAccount.id);
+      
+      if (nextAccount) {
+        console.log(`[TikTok Search Worker] 🔄 Rotating to next account: ${nextAccount.id} (@${nextAccount.account_identifier})`);
+        sendUserEvent(userId, {
+          type: 'info',
+          text: `🔄 Rotating to account @${nextAccount.account_identifier}...`
+        });
+        currentAccount = nextAccount;
+        // Loop will continue with new account
+      } else {
+        console.log('[TikTok Search Worker] ✅ All accounts completed - no more available accounts');
+        sendUserEvent(userId, {
+          type: 'success',
+          text: '✅ All accounts completed!'
+        });
+        currentAccount = null; // Exit loop
+      }
       
     } catch (error) {
       console.error(`[TikTok Search Worker] Error during search:`, error);
@@ -1649,8 +1683,22 @@ export async function runTikTokSearchForAccounts(userId: number) {
           text: `Search failed: ${error instanceof Error ? error.message : 'Unknown error'}` 
         });
       }
+      
+      // On error, try to get next account instead of stopping completely
+      const nextAccount = await getNextAvailableAccount(userId, currentAccount.id);
+      if (nextAccount) {
+        console.log(`[TikTok Search Worker] ⚠️ Error occurred, but continuing with next account: ${nextAccount.id}`);
+        sendUserEvent(userId, {
+          type: 'warning',
+          text: `⚠️ Error on previous account, switching to next...`
+        });
+        currentAccount = nextAccount;
+      } else {
+        console.log('[TikTok Search Worker] ❌ Error occurred and no more accounts available');
+        currentAccount = null; // Exit loop
+      }
     } finally {
-      // PHASE 4: Clean up browser connection
+      // PHASE 4: Clean up browser connection for this account
       if (browserConnection) {
         try {
           await closeBrowserConnection(browserConnection);
@@ -1659,9 +1707,10 @@ export async function runTikTokSearchForAccounts(userId: number) {
           console.error(`[TikTok Search Worker] ⚠️ Error closing browser connection:`, closeError);
         }
       }
-      
-      connection.release();
     }
+  } // End of account rotation while loop
+  
+  connection.release();
     
   } catch (error) {
     console.error('[TikTok Search Worker] Error:', error);

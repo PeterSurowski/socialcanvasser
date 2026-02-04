@@ -16,7 +16,7 @@ export interface BrowserConnection {
 
 export interface TikTokAccount {
   id: number;
-  account_id: string;
+  account_identifier: string;
   browser_type: BrowserType;
   incogniton_profile_id?: string;
   session_data?: string; // JSON string
@@ -234,7 +234,7 @@ async function connectIncogniton(profileId: string): Promise<BrowserConnection> 
  * Automatically chooses the right connection method based on account settings
  */
 export async function connectBrowserForAccount(account: TikTokAccount): Promise<BrowserConnection> {
-  console.log(`[BrowserManager] Connecting browser for account ${account.account_id}...`);
+  console.log(`[BrowserManager] Connecting browser for account ${account.account_identifier}...`);
   console.log(`[BrowserManager] Browser type: ${account.browser_type}`);
   
   if (account.browser_type === 'incogniton' && account.incogniton_profile_id) {
@@ -300,7 +300,7 @@ export async function switchToAccount(
   currentConnection: BrowserConnection | null,
   newAccount: TikTokAccount
 ): Promise<BrowserConnection> {
-  console.log(`[BrowserManager] Switching to account ${newAccount.account_id}...`);
+  console.log(`[BrowserManager] Switching to account ${newAccount.account_identifier}...`);
   
   // Close current connection if exists
   if (currentConnection) {
@@ -310,7 +310,7 @@ export async function switchToAccount(
   
   // Connect to new account's browser
   const newConnection = await connectBrowserForAccount(newAccount);
-  console.log(`[BrowserManager] ✅ Successfully switched to account ${newAccount.account_id}`);
+  console.log(`[BrowserManager] ✅ Successfully switched to account ${newAccount.account_identifier}`);
   
   return newConnection;
 }
