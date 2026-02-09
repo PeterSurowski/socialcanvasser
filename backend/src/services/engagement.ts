@@ -114,12 +114,12 @@ export async function tryToSendDM(
       // CRITICAL: Wait for the Message button specifically (not just any profile element)
       // TikTok dynamically renders buttons, so we need to wait for this exact element
       await page.waitForSelector('[data-e2e="message-button"]', { 
-        timeout: 15000,
+        timeout: 30000,
         visible: true
       });
       console.log(`[Engagement] ✅ Message button found and visible`);
     } catch (waitErr) {
-      console.log(`[Engagement] ⚠️ Message button not found within 15 seconds - user may have DMs disabled`);
+      console.log(`[Engagement] ⚠️ Message button not found within 30 seconds - user may have DMs disabled`);
       
       // Remove navigation listener before returning
       page.removeAllListeners('framenavigated');
