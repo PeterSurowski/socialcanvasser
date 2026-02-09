@@ -1,10 +1,11 @@
--- Social Canvasser Database Schema
+-- Social Canvasser Database Schema - COMPLETE VERSION
+-- Includes all migrations and updates
 
 CREATE DATABASE IF NOT EXISTS socialcanvasser;
 USE socialcanvasser;
 
 -- Users table (app login credentials)
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id INT PRIMARY KEY AUTO_INCREMENT,
     username VARCHAR(255) UNIQUE NOT NULL,
     email VARCHAR(255) UNIQUE NOT NULL,
@@ -15,31 +16,43 @@ CREATE TABLE users (
     INDEX idx_email (email)
 );
 
--- TikTok accounts table
-CREATE TABLE tiktok_accounts (
+-- TikTok accounts table (with ALL migrations applied)
+CREATE TABLE IF NOT EXISTS tiktok_accounts (
     id INT PRIMARY KEY AUTO_INCREMENT,
     user_id INT NOT NULL,
     account_identifier VARCHAR(255) NOT NULL,
-    session_data TEXT, -- Encrypted cookies/session info (JSON blob)
+    session_data TEXT,
+    incogniton_profile_id VARCHAR(255) DEFAULT NULL COMMENT 'Incogniton browser profile ID for persistent session management',
+    browser_type ENUM('chrome_debug', 'incogniton') DEFAULT 'chrome_debug' COMMENT 'Browser connection method: chrome_debug (legacy) or incogniton (recommended)',
     session_expires_at TIMESTAMP NULL,
     last_checked TIMESTAMP NULL,
     in_use BOOLEAN DEFAULT FALSE,
     cooldown_until TIMESTAMP NULL,
     is_active BOOLEAN DEFAULT TRUE,
     last_used_at TIMESTAMP NULL,
-    actions_count INT DEFAULT 0, -- Track actions for rotation
+    actions_count INT DEFAULT 0,
+    actions_per_session INT NOT NULL DEFAULT 2,
+    current_session_actions INT NOT NULL DEFAULT 0,
+    is_rate_limited BOOLEAN NOT NULL DEFAULT FALSE,
+    rate_limit_detected_at TIMESTAMP NULL,
+    rate_limit_expires_at TIMESTAMP NULL,
+    last_keyword_index INT DEFAULT 0,
+    last_search_at DATETIME NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-    INDEX idx_user_id (user_id)
+    INDEX idx_user_id (user_id),
+    INDEX idx_incogniton_profile_id (incogniton_profile_id),
+    INDEX idx_tiktok_accounts_rate_limited (is_rate_limited, rate_limit_expires_at),
+    INDEX idx_tiktok_accounts_user_id (user_id)
 );
 
 -- Configuration table
-CREATE TABLE user_config (
+CREATE TABLE IF NOT EXISTS user_config (
     id INT PRIMARY KEY AUTO_INCREMENT,
     user_id INT UNIQUE NOT NULL,
-    keywords TEXT NOT NULL, -- Comma-separated keywords
-    ai_prompt TEXT NOT NULL, -- Prompt for OpenAI
+    keywords TEXT NOT NULL,
+    ai_prompt TEXT NOT NULL,
     example_dm TEXT NOT NULL,
     example_comment TEXT NOT NULL,
     openai_api_key VARCHAR(255) NOT NULL,
@@ -50,13 +63,57 @@ CREATE TABLE user_config (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+-- TikTok posts table
+CREATE TABLE IF NOT EXISTS tiktok_posts (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    account_id INT NOT NULL,
+    username VARCHAR(255) NOT NULL,
+    caption TEXT,
+    video_url VARCHAR(500) NOT NULL UNIQUE,
+    likes INT DEFAULT 0,
+    comments INT DEFAULT 0,
+    shares INT DEFAULT 0,
+    found_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    processed BOOLEAN DEFAULT FALSE,
+    scraped_comments_at TIMESTAMP NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES tiktok_accounts(id) ON DELETE CASCADE,
+    INDEX idx_account_id (account_id),
+    INDEX idx_video_url (video_url),
+    INDEX idx_processed (processed),
+    INDEX idx_found_at (found_at),
+    INDEX idx_account_processed (account_id, processed)
+);
+
+-- TikTok comments table
+CREATE TABLE IF NOT EXISTS tiktok_comments (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    post_id INT NOT NULL,
+    comment_id VARCHAR(255),
+    username VARCHAR(255) NOT NULL,
+    comment_text TEXT NOT NULL,
+    likes INT DEFAULT 0,
+    posted_at TIMESTAMP NULL,
+    scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    buying_intent ENUM('pending', 'yes', 'no') DEFAULT 'pending',
+    buying_intent_confidence DECIMAL(3,2) NULL,
+    processed BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (post_id) REFERENCES tiktok_posts(id) ON DELETE CASCADE,
+    INDEX idx_post_id (post_id),
+    INDEX idx_username (username),
+    INDEX idx_posted_at (posted_at),
+    INDEX idx_buying_intent (buying_intent),
+    INDEX idx_processed (processed)
+);
+
 -- Activity logs table
-CREATE TABLE activity_logs (
+CREATE TABLE IF NOT EXISTS activity_logs (
     id INT PRIMARY KEY AUTO_INCREMENT,
     user_id INT NOT NULL,
     tiktok_account_id INT NOT NULL,
     action_type ENUM('dm_sent', 'comment_posted', 'dm_reply_received', 'comment_reply_received', 'comment_liked') NOT NULL,
-    target_user VARCHAR(255), -- TikTok username we contacted
+    target_user VARCHAR(255),
     post_url VARCHAR(500),
     message_content TEXT,
     success BOOLEAN DEFAULT TRUE,
@@ -71,7 +128,7 @@ CREATE TABLE activity_logs (
 );
 
 -- Contacted users table (prevent duplicate contacts)
-CREATE TABLE contacted_users (
+CREATE TABLE IF NOT EXISTS contacted_users (
     id INT PRIMARY KEY AUTO_INCREMENT,
     user_id INT NOT NULL,
     tiktok_username VARCHAR(255) NOT NULL,
@@ -85,8 +142,8 @@ CREATE TABLE contacted_users (
     INDEX idx_user_username (user_id, tiktok_username)
 );
 
--- Job queue state (optional, for tracking automation state)
-CREATE TABLE automation_state (
+-- Automation state table (tracking automation state)
+CREATE TABLE IF NOT EXISTS automation_state (
     id INT PRIMARY KEY AUTO_INCREMENT,
     user_id INT UNIQUE NOT NULL,
     is_running BOOLEAN DEFAULT FALSE,
