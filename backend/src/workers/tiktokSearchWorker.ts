@@ -1199,6 +1199,9 @@ export async function searchTikTokByKeywords(
                             browserConnection = await switchToAccount(browserConnection, nextAccountConfig);
                             page = browserConnection.page;
                             
+                            // Reset counter for the newly selected account
+                            await resetActionCounter(nextAccount.id);
+                            
                             // Update current account ID for this search session
                             currentAccountId = nextAccount.id;
                             // Note: currentAccount is in outer scope, will be updated after search completes
