@@ -527,6 +527,34 @@ export async function searchTikTokByKeywords(
           return debugInfo;
         });
         
+        // Deduplicate video URLs (TikTok search results can contain duplicates after scrolling)
+        const originalLength = videoElements.results.length;
+        const seenUrls = new Set<string>();
+        const duplicateUrls: string[] = [];
+        
+        const uniqueResults = videoElements.results.filter(result => {
+          if (seenUrls.has(result.href)) {
+            duplicateUrls.push(result.href);
+            return false;
+          }
+          seenUrls.add(result.href);
+          return true;
+        });
+        
+        videoElements.results = uniqueResults;
+        
+        if (duplicateUrls.length > 0) {
+          console.log(`[TikTok Search] 🧹 Removed ${duplicateUrls.length} duplicate URLs:`);
+          // Show which URLs were duplicated and how many times each
+          const duplicateCounts = new Map<string, number>();
+          duplicateUrls.forEach(url => {
+            duplicateCounts.set(url, (duplicateCounts.get(url) || 0) + 1);
+          });
+          duplicateCounts.forEach((count, url) => {
+            console.log(`  ${url} (appeared ${count + 1} times total)`);
+          });
+        }
+        
         // Log debug info in Node.js terminal where we can see it
         console.log(`[EXTRACTION DEBUG] Current URL: ${videoElements.currentUrl}`);
         console.log(`[EXTRACTION DEBUG] Page title: ${videoElements.pageTitle}`);
@@ -539,7 +567,7 @@ export async function searchTikTokByKeywords(
         if (videoElements.videoLinksCount > 0) {
           console.log(`[EXTRACTION DEBUG] Video links found in fallback: ${videoElements.videoLinksCount}`);
         }
-        console.log(`[EXTRACTION DEBUG] Extracted ${videoElements.results.length} video URLs:`);
+        console.log(`[EXTRACTION DEBUG] Extracted ${videoElements.results.length} video URLs (after deduplication):`);
         videoElements.results.forEach((result, i) => {
           console.log(`  ${i + 1}. ${result.href}`);
         });
@@ -548,6 +576,14 @@ export async function searchTikTokByKeywords(
         videoElements.results.forEach((ve, i) => {
           console.log(`  ${i + 1}. ${ve.href}`);
         });
+        
+        // Send result count to Live Feed
+        if (userId) {
+          sendUserEvent(userId, { 
+            type: 'info', 
+            text: `🎯 ${videoElements.results.length} results found!` 
+          });
+        }
         
         // For each video, navigate directly to it instead of clicking (more reliable)
         for (let i = 0; i < videoElements.results.length; i++) {
@@ -578,6 +614,14 @@ export async function searchTikTokByKeywords(
                 timeout: 15000 
               });
               console.log(`[TikTok Search] Video content detected!`);
+              
+              // Send to Live Feed AFTER successful navigation
+              if (userId) {
+                sendUserEvent(userId, { 
+                  type: 'info', 
+                  text: `👓 Reading comments on ${videoUrl}` 
+                });
+              }
               
               // Wait additional time for comments section to render
               await new Promise(resolve => setTimeout(resolve, 2000));
@@ -614,6 +658,14 @@ export async function searchTikTokByKeywords(
                   console.log(`[TikTok Search] ✅ Comments section is now visible and ready`);
                 } catch (waitErr) {
                   console.log(`[TikTok Search] ⚠️ Comments section did not become visible after clicking`);
+                  
+                  // Send to Live Feed
+                  if (userId) {
+                    sendUserEvent(userId, { 
+                      type: 'error', 
+                      text: `❌ Comment button not detected` 
+                    });
+                  }
                 }
                 
                 // If comments aren't visible, skip this video
@@ -630,6 +682,15 @@ export async function searchTikTokByKeywords(
               
             } catch (err) {
               console.log(`[TikTok Search] Video page content didn't load, skipping this video`);
+              
+              // Send to Live Feed
+              if (userId) {
+                sendUserEvent(userId, { 
+                  type: 'error', 
+                  text: `❌ Video failed to load` 
+                });
+              }
+              
               await page.goBack();
               await new Promise(resolve => setTimeout(resolve, 2000));
               continue;
@@ -958,11 +1019,23 @@ export async function searchTikTokByKeywords(
             
             console.log(`[TikTok Search] After filtering: ${filteredComments.length} comments from last 7 days (filtered out ${videoData.comments.length - filteredComments.length} old comments)`);
             
+            // Send comment count to Live Feed
+            if (userId) {
+              sendUserEvent(userId, { 
+                type: 'info', 
+                text: `🎯 ${videoData.comments.length} comments found!` 
+              });
+            }
+            
             // Replace comments with filtered ones
             videoData.comments = filteredComments;
             
             // === OPENAI ANALYSIS & ENGAGEMENT ===
-            // Only proceed if we have user config and comments to analyze
+            // Initialize stats
+            let acceptedCount = 0;
+            let rejectedCount = 0;
+            
+            // Only proceed with OpenAI analysis if we have recent comments to analyze
             if (userId && userConfig && filteredComments.length > 0) {
               try {
                 console.log(`[TikTok Search] Analyzing ${filteredComments.length} comments for buying intent...`);
@@ -974,7 +1047,22 @@ export async function searchTikTokByKeywords(
                   userConfig
                 );
                 
-                console.log(`[TikTok Search] OpenAI identified ${buyingIntentResults.filter(r => r.hasBuyingIntent).length} comments with buying intent`);
+                acceptedCount = buyingIntentResults.filter(r => r.hasBuyingIntent).length;
+                rejectedCount = filteredComments.length - acceptedCount;
+                
+                console.log(`[TikTok Search] OpenAI identified ${acceptedCount} comments with buying intent`);
+                
+                // Send acceptance/rejection stats to Live Feed (only once, before engagements)
+                if (userId) {
+                  sendUserEvent(userId, { 
+                    type: 'info', 
+                    text: `👍 ${acceptedCount} accepted` 
+                  });
+                  sendUserEvent(userId, { 
+                    type: 'info', 
+                    text: `👎 ${rejectedCount} rejected` 
+                  });
+                }
                 
                 // Engage with users who have buying intent
                 for (const result of buyingIntentResults) {
@@ -995,7 +1083,7 @@ export async function searchTikTokByKeywords(
                     
                     sendUserEvent(userId, {
                       type: 'success',
-                      text: `✅ Buying intent found`
+                      text: `🎯 Buying intent found`
                     });
                     
                     // PHASE 3: Engagement with account rotation
@@ -1200,6 +1288,16 @@ export async function searchTikTokByKeywords(
                   });
                 }
               }
+            } else if (userId && filteredComments.length === 0) {
+              // If no recent comments to analyze, still send 0/0 stats
+              sendUserEvent(userId, { 
+                type: 'info', 
+                text: `👍 0 accepted` 
+              });
+              sendUserEvent(userId, { 
+                type: 'info', 
+                text: `👎 0 rejected` 
+              });
             }
             
             posts.push(videoData);
@@ -1493,7 +1591,7 @@ export async function runTikTokSearchForAccounts(userId: number) {
         // Send live feed event: searching
         sendUserEvent(userId, { 
           type: 'info', 
-          text: `Searching for "${keyword}" with @${currentAccount.account_identifier}...` 
+          text: `🔍 Searching for "${keyword}" with @${currentAccount.account_identifier}` 
         });
         
         // Define callback for account rotation (if needed during engagement phase)

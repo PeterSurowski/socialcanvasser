@@ -182,7 +182,7 @@ router.post('/start', async (req: any, res) => {
     }
 
     await db.query('INSERT INTO automation_state (user_id, is_running) VALUES (?, ?) ON DUPLICATE KEY UPDATE is_running = VALUES(is_running)', [userId, true])
-    sendUserEvent(userId, { type: 'status', text: '🔍 Starting automation - searching for posts...' })
+    sendUserEvent(userId, { type: 'status', text: '🟢 Starting automation' })
     
     // Run the full workflow: search posts, then scrape comments
     runAutomationWorkflow(userId);
