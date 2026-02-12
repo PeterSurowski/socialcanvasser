@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import DashboardControls from '../components/DashboardControls'
 import SidebarFeed from '../components/SidebarFeed'
 import Settings from '../components/Settings'
+import StatsPanel from '../components/StatsPanel'
 
 interface Account {
   id: number;
@@ -142,7 +143,9 @@ export default function Dashboard() {
               </div>
             )}
 
-            <div className="bg-white rounded-lg p-6">Main dashboard content (charts, stats)</div>
+            <div className="bg-white rounded-lg p-6">
+              <StatsPanel accounts={accounts} />
+            </div>
           </>
         ) : (
           <Settings />

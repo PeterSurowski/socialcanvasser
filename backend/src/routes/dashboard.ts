@@ -68,6 +68,57 @@ router.get('/stats', authenticateToken, async (req: AuthRequest, res) => {
   }
 });
 
+// Get account-specific stats for a date range
+router.get('/account-stats/:accountId', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const accountId = parseInt(req.params.accountId);
+    const startDate = req.query.startDate as string || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const endDate = req.query.endDate as string || new Date().toISOString().split('T')[0];
+
+    // Verify the account belongs to this user
+    const [accountCheck]: any = await db.query(
+      'SELECT id FROM tiktok_accounts WHERE id = ? AND user_id = ?',
+      [accountId, userId]
+    );
+
+    if (!accountCheck || accountCheck.length === 0) {
+      return res.status(403).json({ message: 'Account not found' });
+    }
+
+    // Get DMs sent
+    const [dmsResult]: any = await db.query(
+      `SELECT COUNT(*) as count FROM activity_logs 
+       WHERE tiktok_account_id = ? 
+         AND action_type = 'dm_sent' 
+         AND DATE(created_at) >= ? 
+         AND DATE(created_at) <= ?`,
+      [accountId, startDate, endDate]
+    );
+
+    // Get comment replies posted
+    const [commentsResult]: any = await db.query(
+      `SELECT COUNT(*) as count FROM activity_logs 
+       WHERE tiktok_account_id = ? 
+         AND action_type = 'comment_posted' 
+         AND DATE(created_at) >= ? 
+         AND DATE(created_at) <= ?`,
+      [accountId, startDate, endDate]
+    );
+
+    res.json({
+      accountId,
+      startDate,
+      endDate,
+      dms_sent: (dmsResult[0] as any)?.count || 0,
+      comment_replies: (commentsResult[0] as any)?.count || 0
+    });
+  } catch (error) {
+    console.error('Account stats error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // Get recent activity
 router.get('/activity', authenticateToken, async (req: AuthRequest, res) => {
   try {
