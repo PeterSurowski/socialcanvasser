@@ -9,6 +9,7 @@ interface Account {
   account_identifier: string;
   is_active: boolean;
   session_data: string;
+  is_paused?: boolean;
 }
 
 export default function Dashboard() {

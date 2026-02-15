@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS tiktok_accounts (
     actions_per_session INT NOT NULL DEFAULT 2,
     current_session_actions INT NOT NULL DEFAULT 0,
     is_rate_limited BOOLEAN NOT NULL DEFAULT FALSE,
+    is_paused BOOLEAN NOT NULL DEFAULT FALSE,
     rate_limit_detected_at TIMESTAMP NULL,
     rate_limit_expires_at TIMESTAMP NULL,
     last_keyword_index INT DEFAULT 0,
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS tiktok_accounts (
     INDEX idx_user_id (user_id),
     INDEX idx_incogniton_profile_id (incogniton_profile_id),
     INDEX idx_tiktok_accounts_rate_limited (is_rate_limited, rate_limit_expires_at),
+    INDEX idx_tiktok_accounts_paused (is_paused),
     INDEX idx_tiktok_accounts_user_id (user_id)
 );
 

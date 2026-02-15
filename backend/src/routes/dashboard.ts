@@ -51,7 +51,7 @@ router.get('/stats', authenticateToken, async (req: AuthRequest, res) => {
     // Get TikTok accounts
     console.log(`[Dashboard Stats] Fetching accounts for user_id: ${userId}`);
     const [accounts]: any = await db.query(
-      'SELECT id, account_identifier, is_active, last_used_at, actions_count, session_data FROM tiktok_accounts WHERE user_id = ?',
+      'SELECT id, account_identifier, is_active, is_paused, last_used_at, actions_count, session_data FROM tiktok_accounts WHERE user_id = ?',
       [userId]
     );
     console.log(`[Dashboard Stats] Found ${accounts.length} accounts:`, accounts.map((a: any) => ({ id: a.id, name: a.account_identifier, user_id: userId })));
@@ -115,6 +115,41 @@ router.get('/account-stats/:accountId', authenticateToken, async (req: AuthReque
     });
   } catch (error) {
     console.error('Account stats error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Toggle pause state for a TikTok account
+router.post('/accounts/:accountId/toggle-pause', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const accountId = parseInt(req.params.accountId);
+
+    // Verify the account belongs to this user
+    const [accountCheck]: any = await db.query(
+      'SELECT id, is_paused FROM tiktok_accounts WHERE id = ? AND user_id = ?',
+      [accountId, userId]
+    );
+
+    if (!accountCheck || accountCheck.length === 0) {
+      return res.status(403).json({ message: 'Account not found' });
+    }
+
+    const currentPauseState = accountCheck[0].is_paused;
+    const newPauseState = !currentPauseState;
+
+    // Toggle the pause state
+    await db.query(
+      'UPDATE tiktok_accounts SET is_paused = ? WHERE id = ?',
+      [newPauseState, accountId]
+    );
+
+    res.json({ 
+      success: true, 
+      is_paused: newPauseState 
+    });
+  } catch (error) {
+    console.error('Toggle pause error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });

@@ -1511,14 +1511,16 @@ async function getNextAvailableAccount(userId: number, currentAccountId: number)
     // Query for next available account:
     // 1. Belongs to this user
     // 2. Is active
-    // 3. NOT rate limited OR rate limit has expired
-    // 4. Preferably a different account than current (for rotation)
+    // 3. NOT paused
+    // 4. NOT rate limited OR rate limit has expired
+    // 5. Preferably a different account than current (for rotation)
     const [accounts] = await connection.query(
       `SELECT id, account_identifier, session_data, actions_per_session, current_session_actions, 
               is_rate_limited, rate_limit_expires_at, last_keyword_index
        FROM tiktok_accounts 
        WHERE user_id = ? 
          AND is_active = 1 
+         AND is_paused = FALSE
          AND (is_rate_limited = FALSE OR rate_limit_expires_at IS NULL OR rate_limit_expires_at < NOW())
        ORDER BY 
          CASE WHEN id = ? THEN 0 ELSE 1 END DESC,  -- Prefer different account (1=different comes first with DESC)
@@ -1529,7 +1531,7 @@ async function getNextAvailableAccount(userId: number, currentAccountId: number)
     );
     
     if (!accounts || (accounts as any[]).length === 0) {
-      console.log(`[Account Rotation] ⚠️ No available accounts for user ${userId} - all may be snoozed`);
+      console.log(`[Account Rotation] ⚠️ No available accounts for user ${userId} - all may be snoozed or paused`);
       return null;
     }
     

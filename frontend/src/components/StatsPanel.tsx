@@ -3,11 +3,13 @@ import React, { useEffect, useState } from 'react'
 interface Account {
   id: number;
   account_identifier: string;
+  is_paused?: boolean;
 }
 
 interface AccountStats {
   dms_sent: number;
   comment_replies: number;
+  is_paused?: boolean;
 }
 
 export default function StatsPanel({ accounts }: { accounts: Account[] }) {
@@ -46,7 +48,8 @@ export default function StatsPanel({ accounts }: { accounts: Account[] }) {
         results.forEach((result, index) => {
           newStats[accounts[index].id] = {
             dms_sent: result.dms_sent || 0,
-            comment_replies: result.comment_replies || 0
+            comment_replies: result.comment_replies || 0,
+            is_paused: accounts[index].is_paused || false
           }
         })
 
@@ -66,10 +69,12 @@ export default function StatsPanel({ accounts }: { accounts: Account[] }) {
           headers: { Authorization: `Bearer ${token}` }
         })
         const data = await res.json()
+        const account = accounts.find(a => a.id === activeTab)
         setStats({
           [activeTab]: {
             dms_sent: data.dms_sent || 0,
-            comment_replies: data.comment_replies || 0
+            comment_replies: data.comment_replies || 0,
+            is_paused: account?.is_paused || false
           }
         })
       }
@@ -83,6 +88,25 @@ export default function StatsPanel({ accounts }: { accounts: Account[] }) {
   const currentStats = activeTab === 'overall' 
     ? stats['overall'] || { dms_sent: 0, comment_replies: 0 }
     : stats[activeTab as number] || { dms_sent: 0, comment_replies: 0 }
+
+  const handleTogglePause = async () => {
+    if (activeTab === 'overall') return; // Can't pause/unpause "overall"
+
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch(`/api/dashboard/accounts/${activeTab}/toggle-pause`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      })
+      
+      if (res.ok) {
+        // Refresh stats to get updated pause state
+        fetchStats()
+      }
+    } catch (error) {
+      console.error('Error toggling pause:', error)
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -141,15 +165,36 @@ export default function StatsPanel({ accounts }: { accounts: Account[] }) {
       {loading ? (
         <div className="text-center py-8 text-gray-500">Loading stats...</div>
       ) : (
-        <div className="grid grid-cols-2 gap-4 mt-6">
-          <div className="bg-blue-50 rounded-lg p-6 border border-blue-200">
-            <div className="text-sm font-medium text-blue-600 mb-2">Total # of DMs sent</div>
-            <div className="text-3xl font-bold text-blue-900">{currentStats.dms_sent}</div>
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <div className="bg-blue-50 rounded-lg p-6 border border-blue-200">
+              <div className="text-sm font-medium text-blue-600 mb-2">Total # of DMs sent</div>
+              <div className="text-3xl font-bold text-blue-900">{currentStats.dms_sent}</div>
+            </div>
+            <div className="bg-green-50 rounded-lg p-6 border border-green-200">
+              <div className="text-sm font-medium text-green-600 mb-2">Total # of comment replies posted</div>
+              <div className="text-3xl font-bold text-green-900">{currentStats.comment_replies}</div>
+            </div>
           </div>
-          <div className="bg-green-50 rounded-lg p-6 border border-green-200">
-            <div className="text-sm font-medium text-green-600 mb-2">Total # of comment replies posted</div>
-            <div className="text-3xl font-bold text-green-900">{currentStats.comment_replies}</div>
-          </div>
+
+          {/* Account Pause Status (only show for individual account tabs) */}
+          {activeTab !== 'overall' && (
+            <div className="flex items-center justify-between bg-gray-50 rounded-lg p-4 border border-gray-200">
+              <div className="text-sm font-medium text-gray-700">
+                {currentStats.is_paused ? '⏸️ Account paused' : '▶️ Account in use'}
+              </div>
+              <button
+                onClick={handleTogglePause}
+                className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+                  currentStats.is_paused
+                    ? 'bg-green-600 hover:bg-green-700 text-white'
+                    : 'bg-yellow-600 hover:bg-yellow-700 text-white'
+                }`}
+              >
+                {currentStats.is_paused ? 'Unpause' : 'Pause'}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>
