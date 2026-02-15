@@ -125,7 +125,9 @@ export async function searchTikTokByKeywords(
   userId?: number,
   userConfig?: any,
   getBrowserContextForAccount?: (account: any) => Promise<{ context: any, page: any }>,
-  existingPage?: any
+  existingPage?: any,
+  checkpoint?: AutomationCheckpoint | null,
+  commentRateLimitTracker?: Map<number, number>
 ): Promise<{ posts: TikTokPost[], nextKeywordIndex: number }> {
   const connection = await db.getConnection();
   
@@ -174,6 +176,24 @@ export async function searchTikTokByKeywords(
     const nextKeywordIndex = (keywordIndex + 1) % keywords.length;
     
     console.log(`[TikTok Search] Searching for keyword: "${keyword}" (index ${keywordIndex}/${keywords.length - 1})`);
+    
+    const shouldResume = !!(checkpoint && checkpoint.accountId === accountId && checkpoint.keywordIndex === keywordIndex);
+    const resumeVideoIndex = shouldResume ? (checkpoint?.videoIndex ?? 0) : 0;
+    const resumeVideoUrl = shouldResume ? (checkpoint?.videoUrl ?? null) : null;
+    const resumeStage = shouldResume ? (checkpoint?.stage ?? null) : null;
+    const resumeEngagementIndex = shouldResume ? (checkpoint?.engagementIndex ?? 0) : 0;
+    
+    if (userId) {
+      await updateAutomationCheckpoint(userId, {
+        accountId,
+        keywordIndex,
+        videoIndex: resumeVideoIndex,
+        videoUrl: resumeVideoUrl,
+        stage: 'search',
+        engagementIndex: 0,
+        engagementUsername: null
+      });
+    }
     
     try {
       // First, check current page URL
@@ -585,13 +605,48 @@ export async function searchTikTokByKeywords(
           });
         }
         
+        let startIndex = 0;
+        if (resumeVideoUrl) {
+          const resumeIndex = videoElements.results.findIndex(result => {
+            const url = result.href.startsWith('http') ? result.href : `https://www.tiktok.com${result.href}`;
+            return url === resumeVideoUrl;
+          });
+          if (resumeIndex >= 0) {
+            startIndex = resumeIndex;
+          } else if (resumeVideoIndex) {
+            startIndex = Math.min(resumeVideoIndex, videoElements.results.length - 1);
+          }
+        } else if (resumeVideoIndex) {
+          startIndex = Math.min(resumeVideoIndex, videoElements.results.length - 1);
+        }
+        
+        if (startIndex > 0) {
+          console.log(`[TikTok Search] Resuming from video index ${startIndex + 1}/${videoElements.results.length}`);
+        }
+        
         // For each video, navigate directly to it instead of clicking (more reliable)
-        for (let i = 0; i < videoElements.results.length; i++) {
+        for (let i = startIndex; i < videoElements.results.length; i++) {
+          if (userId && !(await isAutomationRunning(userId))) {
+            console.log('[TikTok Search] Automation stopped - exiting video loop');
+            return { posts, nextKeywordIndex };
+          }
           const videoElement = videoElements.results[i];
           // Check if href is already a full URL or just a path
           const videoUrl = videoElement.href.startsWith('http') 
             ? videoElement.href 
             : `https://www.tiktok.com${videoElement.href}`;
+          
+          if (userId) {
+            await updateAutomationCheckpoint(userId, {
+              accountId: currentAccountId,
+              keywordIndex,
+              videoIndex: i,
+              videoUrl,
+              stage: 'video_nav',
+              engagementIndex: 0,
+              engagementUsername: null
+            });
+          }
           
           try {
             // Navigate directly to the video URL
@@ -614,6 +669,16 @@ export async function searchTikTokByKeywords(
                 timeout: 15000 
               });
               console.log(`[TikTok Search] Video content detected!`);
+              
+              if (userId) {
+                await updateAutomationCheckpoint(userId, {
+                  accountId: currentAccountId,
+                  keywordIndex,
+                  videoIndex: i,
+                  videoUrl,
+                  stage: 'comments'
+                });
+              }
               
               // Send to Live Feed AFTER successful navigation
               if (userId) {
@@ -682,6 +747,16 @@ export async function searchTikTokByKeywords(
               
             } catch (err) {
               console.log(`[TikTok Search] Video page content didn't load, skipping this video`);
+              
+              if (userId) {
+                await updateAutomationCheckpoint(userId, {
+                  accountId: currentAccountId,
+                  keywordIndex,
+                  videoIndex: i,
+                  videoUrl,
+                  stage: 'video_failed'
+                });
+              }
               
               // Send to Live Feed
               if (userId) {
@@ -842,6 +917,19 @@ export async function searchTikTokByKeywords(
               } else {
                 console.log(`[TikTok Search] ⚠️ Only scraped ${percentage}% of comments`);
                 sendUserEvent(userId, 'warning', `⚠️ Only scraped ${countVerification.scrapedCount}/${countVerification.expectedCount} comments (${percentage}%)`);
+              }
+              
+              if (userId && countVerification.expectedCount > 0 && countVerification.scrapedCount === 0 && commentRateLimitTracker) {
+                const previousCount = commentRateLimitTracker.get(currentAccountId) || 0;
+                const nextCount = previousCount + 1;
+                commentRateLimitTracker.set(currentAccountId, nextCount);
+                console.log(`[TikTok Search] ⚠️ No comments loaded despite ${countVerification.expectedCount} expected (consecutive ${nextCount}/3)`);
+                if (nextCount >= 3) {
+                  await snoozeAccount(currentAccountId, userId);
+                  throw new Error('COMMENT_RATE_LIMIT');
+                }
+              } else if (commentRateLimitTracker) {
+                commentRateLimitTracker.set(currentAccountId, 0);
               }
             }
             
@@ -1030,6 +1118,18 @@ export async function searchTikTokByKeywords(
             // Replace comments with filtered ones
             videoData.comments = filteredComments;
             
+            if (userId) {
+              await updateAutomationCheckpoint(userId, {
+                accountId: currentAccountId,
+                keywordIndex,
+                videoIndex: i,
+                videoUrl: videoData.post.videoUrl,
+                stage: 'analyze',
+                engagementIndex: 0,
+                engagementUsername: null
+              });
+            }
+            
             // === OPENAI ANALYSIS & ENGAGEMENT ===
             // Initialize stats
             let acceptedCount = 0;
@@ -1064,9 +1164,31 @@ export async function searchTikTokByKeywords(
                   });
                 }
                 
+                const isResumeVideo = (resumeVideoUrl && videoData.post.videoUrl === resumeVideoUrl) || (!resumeVideoUrl && resumeVideoIndex === i);
+                const engagementStartIndex = (isResumeVideo && resumeStage === 'engage') ? resumeEngagementIndex : 0;
+                
                 // Engage with users who have buying intent
-                for (const result of buyingIntentResults) {
+                for (let engagementIndex = 0; engagementIndex < buyingIntentResults.length; engagementIndex++) {
+                  if (userId && !(await isAutomationRunning(userId))) {
+                    console.log('[TikTok Search] Automation stopped - exiting engagement loop');
+                    return { posts, nextKeywordIndex };
+                  }
+                  const result = buyingIntentResults[engagementIndex];
+                  if (engagementIndex < engagementStartIndex) {
+                    continue;
+                  }
                   if (result.hasBuyingIntent && result.customizedDM && result.customizedReply) {
+                    if (userId) {
+                      await updateAutomationCheckpoint(userId, {
+                        accountId: currentAccountId,
+                        keywordIndex,
+                        videoIndex: i,
+                        videoUrl: videoData.post.videoUrl,
+                        stage: 'engage',
+                        engagementIndex,
+                        engagementUsername: result.username
+                      });
+                    }
                     // Find the original comment to display with the engagement message
                     const originalComment = filteredComments.find(c => c.username === result.username);
                     const commentPreview = originalComment ? originalComment.text.substring(0, 100) : '';
@@ -1126,6 +1248,16 @@ export async function searchTikTokByKeywords(
                         
                         // Reset action counter for new account
                         await resetActionCounter(currentAccountId);
+                        
+                        if (userId) {
+                          await updateAutomationCheckpoint(userId, {
+                            accountId: currentAccountId,
+                            keywordIndex,
+                            videoIndex: i,
+                            videoUrl: videoData.post.videoUrl,
+                            stage: 'engage'
+                          });
+                        }
                         
                         // Retry engagement with new account
                         console.log(`[Account Rotation] 🔁 Retrying engagement with new account...`);
@@ -1205,6 +1337,16 @@ export async function searchTikTokByKeywords(
                             // Update current account ID for this search session
                             currentAccountId = nextAccount.id;
                             // Note: currentAccount is in outer scope, will be updated after search completes
+                            
+                            if (userId) {
+                              await updateAutomationCheckpoint(userId, {
+                                accountId: currentAccountId,
+                                keywordIndex,
+                                videoIndex: i,
+                                videoUrl: videoData.post.videoUrl,
+                                stage: 'engage'
+                              });
+                            }
                             
                             console.log(`[Account Rotation] ✅ Successfully switched to account ${nextAccount.id}`);
                             sendUserEvent(userId, {
@@ -1300,6 +1442,18 @@ export async function searchTikTokByKeywords(
               sendUserEvent(userId, { 
                 type: 'info', 
                 text: `👎 0 rejected` 
+              });
+            }
+            
+            if (userId) {
+              await updateAutomationCheckpoint(userId, {
+                accountId: currentAccountId,
+                keywordIndex,
+                videoIndex: i + 1,
+                videoUrl: null,
+                stage: 'video_done',
+                engagementIndex: 0,
+                engagementUsername: null
               });
             }
             
@@ -1474,6 +1628,116 @@ async function resetActionCounter(accountId: number): Promise<void> {
   }
 }
 
+type AutomationCheckpoint = {
+  accountId: number | null;
+  keywordIndex: number | null;
+  videoIndex: number | null;
+  videoUrl: string | null;
+  stage: string | null;
+  engagementIndex: number | null;
+  engagementUsername: string | null;
+};
+
+async function getAutomationCheckpoint(userId: number): Promise<AutomationCheckpoint | null> {
+  const connection = await db.getConnection();
+  try {
+    const [rows] = await connection.query(
+      `SELECT checkpoint_account_id, checkpoint_keyword_index, checkpoint_video_index,
+              checkpoint_video_url, checkpoint_stage, checkpoint_engagement_index,
+              checkpoint_engagement_username
+       FROM automation_state
+       WHERE user_id = ?
+       LIMIT 1`,
+      [userId]
+    );
+
+    const row = (rows as any[])[0];
+    if (!row) {
+      return null;
+    }
+
+    return {
+      accountId: row.checkpoint_account_id ?? null,
+      keywordIndex: row.checkpoint_keyword_index ?? null,
+      videoIndex: row.checkpoint_video_index ?? null,
+      videoUrl: row.checkpoint_video_url ?? null,
+      stage: row.checkpoint_stage ?? null,
+      engagementIndex: row.checkpoint_engagement_index ?? null,
+      engagementUsername: row.checkpoint_engagement_username ?? null
+    };
+  } finally {
+    connection.release();
+  }
+}
+
+async function updateAutomationCheckpoint(userId: number, checkpoint: Partial<AutomationCheckpoint>): Promise<void> {
+  const connection = await db.getConnection();
+  try {
+    await connection.query(
+      'INSERT INTO automation_state (user_id) VALUES (?) ON DUPLICATE KEY UPDATE user_id = VALUES(user_id)',
+      [userId]
+    );
+
+    const fields: string[] = [];
+    const values: any[] = [];
+
+    if ('accountId' in checkpoint) {
+      fields.push('checkpoint_account_id = ?');
+      values.push(checkpoint.accountId);
+    }
+    if ('keywordIndex' in checkpoint) {
+      fields.push('checkpoint_keyword_index = ?');
+      values.push(checkpoint.keywordIndex ?? 0);
+    }
+    if ('videoIndex' in checkpoint) {
+      fields.push('checkpoint_video_index = ?');
+      values.push(checkpoint.videoIndex ?? 0);
+    }
+    if ('videoUrl' in checkpoint) {
+      fields.push('checkpoint_video_url = ?');
+      values.push(checkpoint.videoUrl);
+    }
+    if ('stage' in checkpoint) {
+      fields.push('checkpoint_stage = ?');
+      values.push(checkpoint.stage);
+    }
+    if ('engagementIndex' in checkpoint) {
+      fields.push('checkpoint_engagement_index = ?');
+      values.push(checkpoint.engagementIndex ?? 0);
+    }
+    if ('engagementUsername' in checkpoint) {
+      fields.push('checkpoint_engagement_username = ?');
+      values.push(checkpoint.engagementUsername);
+    }
+
+    if (fields.length === 0) {
+      return;
+    }
+
+    values.push(userId);
+    await connection.query(
+      `UPDATE automation_state SET ${fields.join(', ')} WHERE user_id = ?`,
+      values
+    );
+  } finally {
+    connection.release();
+  }
+}
+
+async function isAutomationRunning(userId: number): Promise<boolean> {
+  const connection = await db.getConnection();
+  try {
+    const [rows] = await connection.query(
+      'SELECT is_running FROM automation_state WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+    const row = (rows as any[])[0];
+    return Boolean(row?.is_running);
+  } finally {
+    connection.release();
+  }
+}
+
 /**
  * Run TikTok search for a specific user's accounts
  * PHASE 3: Multi-context worker with account rotation
@@ -1554,9 +1818,35 @@ export async function runTikTokSearchForAccounts(userId: number) {
     
     console.log(`[TikTok Search Worker] Keywords configured: ${keywords.join(', ')}`);
     console.log(`[TikTok Search Worker] PHASE 3: Multi-account rotation enabled`);
+    const commentRateLimitTracker = new Map<number, number>();
     
-    // PHASE 3: Start with first available account
-    let currentAccount = await getNextAvailableAccount(userId, -1);
+    // Load resume checkpoint (if any)
+    const checkpoint = await getAutomationCheckpoint(userId);
+    
+    // PHASE 3: Start with checkpoint account if available, otherwise first available account
+    let currentAccount: any = null;
+    if (checkpoint?.accountId) {
+      const [checkpointAccountRows] = await connection.query(
+        `SELECT id, account_identifier, session_data, actions_per_session, current_session_actions,
+                is_rate_limited, rate_limit_expires_at, last_keyword_index
+         FROM tiktok_accounts
+         WHERE id = ? AND user_id = ? AND is_active = 1
+         LIMIT 1`,
+        [checkpoint.accountId, userId]
+      );
+      const checkpointAccount = (checkpointAccountRows as any[])[0];
+      if (checkpointAccount) {
+        const isSnoozed = checkpointAccount.is_rate_limited && checkpointAccount.rate_limit_expires_at && new Date(checkpointAccount.rate_limit_expires_at) > new Date();
+        if (!isSnoozed) {
+          currentAccount = checkpointAccount;
+          console.log(`[TikTok Search Worker] Resuming from checkpoint account ${currentAccount.id} (@${currentAccount.account_identifier})`);
+        }
+      }
+    }
+    
+    if (!currentAccount) {
+      currentAccount = await getNextAvailableAccount(userId, -1);
+    }
     
     if (!currentAccount) {
       console.log('[TikTok Search Worker] No available accounts to start with');
@@ -1565,6 +1855,10 @@ export async function runTikTokSearchForAccounts(userId: number) {
     
     // ACCOUNT ROTATION LOOP: Continue searching with different accounts until all exhausted
     while (currentAccount) {
+      if (!(await isAutomationRunning(userId))) {
+        console.log('[TikTok Search Worker] Automation stopped - exiting account loop');
+        return;
+      }
       console.log(`[TikTok Search Worker] Starting with account ${currentAccount.id} (@${currentAccount.account_identifier})`);
       console.log(`[TikTok Search Worker] Action limit: ${currentAccount.actions_per_session} actions per session`);
       
@@ -1617,7 +1911,21 @@ export async function runTikTokSearchForAccounts(userId: number) {
         
         // NOTE: searchTikTokByKeywords will use the existing page and handle engagements with account rotation
         // The page variable may be reassigned during engagement if rotation occurs
-        const result = await searchTikTokByKeywords(currentAccountId, keywords, keywordIndex, userId, userConfig, getBrowserContextForAccount, page);
+        const keywordIndexToUse = (checkpoint && checkpoint.accountId === currentAccountId && checkpoint.keywordIndex !== null)
+          ? checkpoint.keywordIndex
+          : (currentAccount.last_keyword_index || 0);
+      
+        const result = await searchTikTokByKeywords(
+          currentAccountId,
+          keywords,
+          keywordIndexToUse,
+          userId,
+          userConfig,
+          getBrowserContextForAccount,
+          page,
+          checkpoint,
+          commentRateLimitTracker
+        );
         
       console.log(`[TikTok Search Worker] Extracted ${result.posts.length} posts, beginning database insert...`);
       
@@ -1682,10 +1990,25 @@ export async function runTikTokSearchForAccounts(userId: number) {
       console.log(`[TikTok Search Worker] ✅ Successfully stored ${storedCount}/${result.posts.length} posts with comments`);
       
       // Update last_keyword_index and last_search_at for rotation
+      if (!(await isAutomationRunning(userId))) {
+        console.log('[TikTok Search Worker] Automation stopped - skipping keyword index update');
+        return;
+      }
+      
       await connection.query(
         'UPDATE tiktok_accounts SET last_keyword_index = ?, last_search_at = NOW() WHERE id = ?',
         [result.nextKeywordIndex, currentAccount.id]
       );
+      
+      await updateAutomationCheckpoint(userId, {
+        accountId: currentAccount.id,
+        keywordIndex: result.nextKeywordIndex,
+        videoIndex: 0,
+        videoUrl: null,
+        stage: 'search_complete',
+        engagementIndex: 0,
+        engagementUsername: null
+      });
       
       console.log(`[TikTok Search Worker] Next search will use keyword index ${result.nextKeywordIndex}`);
       
@@ -1766,6 +2089,9 @@ export async function runTikTokSearchForAccounts(userId: number) {
       
     } catch (error) {
       console.error(`[TikTok Search Worker] Error during search:`, error);
+      if (error instanceof Error && error.message === 'COMMENT_RATE_LIMIT') {
+        console.log('[TikTok Search Worker] Comment rate limit detected - moving to next account');
+      } else {
       
       // Send user-friendly error messages
       if (error instanceof Error && error.message.includes('ECONNREFUSED')) {
@@ -1783,6 +2109,7 @@ export async function runTikTokSearchForAccounts(userId: number) {
           type: 'error', 
           text: `Search failed: ${error instanceof Error ? error.message : 'Unknown error'}` 
         });
+      }
       }
       
       // On error, try to get next account instead of stopping completely

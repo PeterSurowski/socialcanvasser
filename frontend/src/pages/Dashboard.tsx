@@ -26,6 +26,7 @@ export default function Dashboard() {
     if (res.ok) {
       const data = await res.json()
       setAccounts(data.accounts || [])
+      setRunning(Boolean(data.automation?.is_running))
       
       // Check which accounts need setup (old accounts without ready flag)
       const needsSetupList = (data.accounts || []).filter((acc: Account) => {
@@ -56,14 +57,18 @@ export default function Dashboard() {
 
   const start = async () => {
     const token = localStorage.getItem('token')
-    await fetch('/api/dashboard/start', { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
-    setRunning(true)
+    const res = await fetch('/api/dashboard/start', { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+    if (res.ok) {
+      setRunning(true)
+    }
   }
   
   const stop = async () => {
     const token = localStorage.getItem('token')
-    await fetch('/api/dashboard/stop', { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
-    setRunning(false)
+    const res = await fetch('/api/dashboard/stop', { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+    if (res.ok) {
+      setRunning(false)
+    }
   }
 
   useEffect(() => {
