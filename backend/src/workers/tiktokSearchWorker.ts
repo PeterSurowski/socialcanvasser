@@ -661,6 +661,18 @@ export async function searchTikTokByKeywords(
               console.log(`[TikTok Search] Navigation timeout, continuing...`);
             }
             
+            // Check if automation is still running before processing video
+            if (userId && !(await isAutomationRunning(userId))) {
+              console.log(`[TikTok Search] Automation stopped - halting video processing`);
+              return;
+            }
+            
+            // Check if account is paused before processing video
+            if (await isAccountPaused(currentAccountId)) {
+              console.log(`[TikTok Search] ⏸️ Account ${currentAccountId} is paused - halting video processing`);
+              return;
+            }
+            
             // Wait for ACTUAL video page content to load (not just the shell)
             console.log(`[TikTok Search] Waiting for video page content to render...`);
             try {
@@ -669,6 +681,18 @@ export async function searchTikTokByKeywords(
                 timeout: 15000 
               });
               console.log(`[TikTok Search] Video content detected!`);
+              
+              // Check if account is paused before processing comments
+              if (await isAccountPaused(currentAccountId)) {
+                console.log(`[TikTok Search] ⏸️ Account ${currentAccountId} is paused - stopping`);
+                if (userId) {
+                  sendUserEvent(userId, { 
+                    type: 'info', 
+                    text: `⏸️ Account paused - automation stopped` 
+                  });
+                }
+                return;
+              }
               
               if (userId) {
                 await updateAutomationCheckpoint(userId, {
@@ -709,12 +733,24 @@ export async function searchTikTokByKeywords(
                 });
                 console.log(`[TikTok Search] Comments button clicked!`);
                 
+                // Check if account is paused while waiting for comments to render
+                if (await isAccountPaused(currentAccountId)) {
+                  console.log(`[TikTok Search] ⏸️ Account ${currentAccountId} is paused - stopping comment scrape`);
+                  return;
+                }
+                
                 // Wait for comments section to open and render
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 
                 // CRITICAL: Wait for comment section to be visible before proceeding
                 let commentsReady = false;
                 try {
+                  // Check if paused before waiting for comments to render
+                  if (await isAccountPaused(currentAccountId)) {
+                    console.log(`[TikTok Search] ⏸️ Account ${currentAccountId} is paused - stopping`);
+                    return;
+                  }
+                  
                   await page.waitForSelector('[data-e2e="comment-level-1"]', { 
                     timeout: 8000,
                     visible: true // Wait for it to be VISIBLE, not just in DOM
@@ -1735,6 +1771,23 @@ async function isAutomationRunning(userId: number): Promise<boolean> {
     );
     const row = (rows as any[])[0];
     return Boolean(row?.is_running);
+  } finally {
+    connection.release();
+  }
+}
+
+/**
+ * Check if a specific account is paused
+ */
+async function isAccountPaused(accountId: number): Promise<boolean> {
+  const connection = await db.getConnection();
+  try {
+    const [rows] = await connection.query(
+      'SELECT is_paused FROM tiktok_accounts WHERE id = ? LIMIT 1',
+      [accountId]
+    );
+    const row = (rows as any[])[0];
+    return Boolean(row?.is_paused);
   } finally {
     connection.release();
   }
