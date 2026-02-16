@@ -1883,7 +1883,7 @@ export async function runTikTokSearchForAccounts(userId: number) {
     if (checkpoint?.accountId) {
       const [checkpointAccountRows] = await connection.query(
         `SELECT id, account_identifier, session_data, actions_per_session, current_session_actions,
-                is_rate_limited, rate_limit_expires_at, last_keyword_index
+                is_rate_limited, rate_limit_expires_at, is_paused, last_keyword_index
          FROM tiktok_accounts
          WHERE id = ? AND user_id = ? AND is_active = 1
          LIMIT 1`,
@@ -1892,9 +1892,12 @@ export async function runTikTokSearchForAccounts(userId: number) {
       const checkpointAccount = (checkpointAccountRows as any[])[0];
       if (checkpointAccount) {
         const isSnoozed = checkpointAccount.is_rate_limited && checkpointAccount.rate_limit_expires_at && new Date(checkpointAccount.rate_limit_expires_at) > new Date();
-        if (!isSnoozed) {
+        const isPaused = Boolean(checkpointAccount.is_paused);
+        if (!isSnoozed && !isPaused) {
           currentAccount = checkpointAccount;
           console.log(`[TikTok Search Worker] Resuming from checkpoint account ${currentAccount.id} (@${currentAccount.account_identifier})`);
+        } else if (isPaused) {
+          console.log(`[TikTok Search Worker] Checkpoint account ${checkpointAccount.id} is paused - selecting another account`);
         }
       }
     }
