@@ -12,7 +12,13 @@ interface AccountStats {
   is_paused?: boolean;
 }
 
-export default function StatsPanel({ accounts }: { accounts: Account[] }) {
+export default function StatsPanel({
+  accounts,
+  onRefreshAccounts
+}: {
+  accounts: Account[];
+  onRefreshAccounts?: () => void;
+}) {
   const [activeTab, setActiveTab] = useState<'overall' | number>('overall')
   const [startDate, setStartDate] = useState(() => {
     const date = new Date()
@@ -27,7 +33,7 @@ export default function StatsPanel({ accounts }: { accounts: Account[] }) {
 
   useEffect(() => {
     fetchStats()
-  }, [activeTab, startDate, endDate])
+  }, [activeTab, startDate, endDate, accounts])
 
   const fetchStats = async () => {
     setLoading(true)
@@ -100,8 +106,18 @@ export default function StatsPanel({ accounts }: { accounts: Account[] }) {
       })
       
       if (res.ok) {
-        // Refresh stats to get updated pause state
-        fetchStats()
+        const data = await res.json()
+        setStats((prev) => {
+          const current = prev[activeTab] || { dms_sent: 0, comment_replies: 0 }
+          return {
+            ...prev,
+            [activeTab]: {
+              ...current,
+              is_paused: Boolean(data?.is_paused)
+            }
+          }
+        })
+        onRefreshAccounts?.()
       }
     } catch (error) {
       console.error('Error toggling pause:', error)

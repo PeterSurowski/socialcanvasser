@@ -150,7 +150,7 @@ export default function Dashboard() {
             )}
 
             <div className="bg-white rounded-lg p-6">
-              <StatsPanel accounts={accounts} />
+              <StatsPanel accounts={accounts} onRefreshAccounts={fetchAccounts} />
             </div>
           </>
         ) : (
