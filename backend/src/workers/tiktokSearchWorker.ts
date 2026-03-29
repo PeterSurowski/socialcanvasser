@@ -4,6 +4,7 @@ import { sendUserEvent } from '../events/broadcaster.js';
 import { analyzeCommentsForBuyingIntent } from '../services/openai.js';
 import { engageWithUser } from '../services/engagement.js';
 import { connectBrowserForAccount, closeBrowserConnection, switchToAccount, type BrowserConnection, type TikTokAccount } from '../services/browserManager.js';
+import type { Page } from 'puppeteer-core';
 
 interface TikTokPost {
   username: string;
@@ -13,6 +14,322 @@ interface TikTokPost {
   comments: number;
   shares: number;
   timestamp: Date;
+}
+
+// DM message to send to video creators (no line breaks to prevent premature sending)
+const CREATOR_DM_MESSAGE = `Hey there, you're getting a lot of views on a video you recently posted about peptides. I think you'd be a good fit for the OnlineSupplements.NET's affiliate program. Here's the deal:                       • You get 40% commission (crazy, right?)                    • You get 50% off your own purchases                        • Your customers get 10 percent off                        • All OnlineSupplements.NET customers already get $20 store credit for every $100 they spend plus free shipping on orders over $200                                  If you're interested, just sign up here: https://onlinesupplements.net/affiliates/`;
+
+/**
+ * Send a DM to the creator of the video
+ * Returns true if successful, false if failed (but doesn't throw)
+ */
+async function sendDMToCreator(
+  page: Page,
+  videoUrl: string,
+  userId: number,
+  accountId: number
+): Promise<{ success: boolean; username?: string; error?: string }> {
+  console.log(`[DM Creator] Starting DM send process for ${videoUrl}`);
+  
+  try {
+    // Extract creator username from page
+    const creatorInfo = await page.evaluate(() => {
+      // Try multiple selectors to find the username element
+      let usernameEl = document.querySelector('[data-e2e="browse-username"]') ||
+                       document.querySelector('[data-e2e="creator-nickname"]');
+      
+      // If not found, look for profile link near the video content (not in navigation)
+      if (!usernameEl) {
+        const profileLinks = Array.from(document.querySelectorAll('a[href^="/@"]'));
+        // Filter to find the one that's the video creator (exclude navigation and sidebar)
+        usernameEl = profileLinks.find(el => {
+          const href = el.getAttribute('href') || '';
+          if (!href.startsWith('/@') || href.includes('?')) return false;
+          
+          // Exclude navigation elements (check if inside nav or header)
+          const isInNav = el.closest('nav, header, [role="navigation"]');
+          if (isInNav) return false;
+          
+          // The creator link should have visible text
+          const hasText = el.textContent?.trim();
+          if (!hasText) return false;
+          
+          // Prefer elements with TikTok's typical creator link classes or near video player
+          const isNearVideo = el.closest('[data-e2e="browse-video"], [id*="VideoContainer"]');
+          return !!isNearVideo;
+        }) || profileLinks.find(el => {
+          // Fallback: just find first non-navigation profile link with text
+          const href = el.getAttribute('href') || '';
+          const isInNav = el.closest('nav, header, [role="navigation"]');
+          return href.startsWith('/@') && !href.includes('?') && el.textContent?.trim() && !isInNav;
+        });
+      }
+      
+      let username = '';
+      let profileLink = '';
+      
+      if (usernameEl) {
+        // Get username from text content (may have whitespace/newlines)
+        username = usernameEl.textContent?.trim().replace('@', '') || '';
+        
+        // If text extraction failed, try to get username from href attribute
+        if (!username && usernameEl instanceof HTMLAnchorElement) {
+          const href = usernameEl.getAttribute('href') || '';
+          const match = href.match(/\/@([^/?]+)/);
+          if (match) {
+            username = match[1];
+          }
+        }
+        
+        profileLink = usernameEl instanceof HTMLAnchorElement ? usernameEl.href : '';
+      }
+      
+      return { username, profileLink, foundElement: !!usernameEl };
+    });
+    
+    console.log(`[DM Creator] Found element: ${creatorInfo.foundElement}, Username: "${creatorInfo.username}", Link: ${creatorInfo.profileLink}`);
+    
+    // Fallback: Extract username from video URL (most reliable method)
+    // Video URL format: https://www.tiktok.com/@username/video/123456789
+    let finalUsername = creatorInfo.username;
+    const urlMatch = videoUrl.match(/\/@([^/?]+)/);
+    if (urlMatch && urlMatch[1]) {
+      const usernameFromUrl = urlMatch[1];
+      console.log(`[DM Creator] Username from URL: "${usernameFromUrl}"`);
+      
+      // If we found a username from the page but it doesn't match the URL, use URL version
+      if (finalUsername && finalUsername.toLowerCase() !== usernameFromUrl.toLowerCase()) {
+        console.log(`[DM Creator] ⚠️ Page username "${finalUsername}" doesn't match URL username "${usernameFromUrl}" - using URL version`);
+        finalUsername = usernameFromUrl;
+      } else if (!finalUsername) {
+        // No username found on page, use URL version
+        console.log(`[DM Creator] Using username from URL as fallback`);
+        finalUsername = usernameFromUrl;
+      }
+    }
+    
+    if (!finalUsername) {
+      console.log(`[DM Creator] ⚠️ Could not find creator username`);
+      sendUserEvent(userId, { type: 'warning', text: `⚠️ Could not find creator username` });
+      return { success: false, error: 'Username not found' };
+    }
+    
+    console.log(`[DM Creator] Creator: @${finalUsername}`);
+    sendUserEvent(userId, { type: 'info', text: `📨 Sending DM to @${finalUsername}...` });
+    
+    // Navigate directly to the creator's profile using the URL (most reliable)
+    console.log(`[DM Creator] Navigating to profile...`);
+    const profileUrl = `https://www.tiktok.com/@${finalUsername}`;
+    try {
+      await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      console.log(`[DM Creator] Navigated to ${profileUrl}`);
+    } catch (navError) {
+      console.log(`[DM Creator] ⚠️ Could not navigate to profile: ${navError}`);
+      sendUserEvent(userId, { type: 'warning', text: `⚠️ Could not navigate to creator profile` });
+      return { success: false, username: finalUsername, error: 'Profile navigation failed' };
+    }
+    
+    // Wait for profile page to load
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    await page.waitForSelector('[data-e2e="user-page"], [data-e2e="user-post-item"]', { timeout: 10000 });
+    console.log(`[DM Creator] Profile page loaded`);
+    
+    // Look for the Message button (use data-e2e attribute to avoid navigation button)
+    const messageButtonFound = await page.evaluate(() => {
+      // Try data-e2e attribute first (most reliable)
+      let messageButton = document.querySelector('[data-e2e="message-button"]') as HTMLElement;
+      
+      // Fallback: look for button with "Message" text (singular, not "Messages" which is navigation)
+      if (!messageButton) {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        messageButton = buttons.find(btn => {
+          const text = btn.textContent?.trim() || '';
+          // Match "Message" but NOT "Messages" (navigation button)
+          return text === 'Message' || text.toLowerCase() === 'message';
+        }) as HTMLElement;
+      }
+      
+      if (messageButton) {
+        messageButton.click();
+        return true;
+      }
+      return false;
+    });
+    
+    if (!messageButtonFound) {
+      console.log(`[DM Creator] ⚠️ Message button not found - DMs may be disabled for this user`);
+      sendUserEvent(userId, { type: 'warning', text: `⚠️ @${finalUsername} has DMs disabled` });
+      
+      // Return to video page
+      await page.goBack();
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      return { success: false, username: finalUsername, error: 'Message button not found' };
+    }
+    
+    console.log(`[DM Creator] Message button clicked, waiting for chat interface...`);
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    
+    // Wait for the message input box to appear (TikTok uses Draft.js contenteditable)
+    console.log(`[DM Creator] Waiting for DM compose box...`);
+    try {
+      await page.waitForSelector('.public-DraftEditor-content[contenteditable="true"], [contenteditable="true"]', {
+        timeout: 13000,
+        visible: true
+      });
+      console.log(`[DM Creator] Chat interface loaded`);
+    } catch (waitError) {
+      console.log(`[DM Creator] ⚠️ Timeout waiting for DM compose box`);
+      sendUserEvent(userId, { type: 'warning', text: `⚠️ DM compose box did not load` });
+      
+      // Return to video page
+      await page.goBack();
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const currentUrl = page.url();
+      if (!currentUrl.includes('/video/')) {
+        await page.goBack();
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+      
+      return { success: false, username: finalUsername, error: 'Message input not found' };
+    }
+    
+    // CRITICAL: Click the input to focus it, then use page.type() to simulate human typing
+    console.log(`[DM Creator] Clicking input to focus...`);
+    try {
+      await page.click('.public-DraftEditor-content[contenteditable="true"]');
+    } catch (clickErr) {
+      // Try generic contenteditable as fallback
+      await page.click('[contenteditable="true"]');
+    }
+    
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    // Type the message using page.type() with delay (simulates human typing, makes Send button appear)
+    console.log(`[DM Creator] Typing message (${CREATOR_DM_MESSAGE.length} characters)...`);
+    try {
+      await page.type('.public-DraftEditor-content[contenteditable="true"]', CREATOR_DM_MESSAGE, {
+        delay: 10 // Small delay between keystrokes to simulate human typing
+      });
+    } catch (typeErr) {
+      // Try generic contenteditable as fallback
+      const contentEditables = await page.$$('[contenteditable="true"]');
+      if (contentEditables.length > 0) {
+        await contentEditables[0].type(CREATOR_DM_MESSAGE, { delay: 10 });
+      } else {
+        throw typeErr;
+      }
+    }
+    
+    console.log(`[DM Creator] ✅ Message typed successfully!`);
+    
+    // CRITICAL: Send button only appears AFTER text is entered
+    console.log(`[DM Creator] Waiting for Send button to appear...`);
+    try {
+      await page.waitForSelector('[data-e2e="message-send"]', {
+        timeout: 5000,
+        visible: true
+      });
+      console.log(`[DM Creator] ✅ Send button appeared!`);
+    } catch (waitError) {
+      console.log(`[DM Creator] ⚠️ Send button did not appear after typing`);
+      sendUserEvent(userId, { type: 'warning', text: `⚠️ Send button did not appear` });
+      
+      // Return to video page
+      await page.goBack();
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const currentUrl = page.url();
+      if (!currentUrl.includes('/video/')) {
+        await page.goBack();
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+      
+      return { success: false, username: finalUsername, error: 'Send button did not appear' };
+    }
+    
+    // Click the send button
+    console.log(`[DM Creator] Clicking Send button...`);
+    try {
+      await page.click('[data-e2e="message-send"]');
+      console.log(`[DM Creator] ✅ Send button clicked!`);
+    } catch (clickError) {
+      console.log(`[DM Creator] ❌ Failed to click Send button:`, clickError);
+      sendUserEvent(userId, { type: 'warning', text: `⚠️ Failed to click Send button` });
+      
+      // Return to video page
+      await page.goBack();
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const currentUrl = page.url();
+      if (!currentUrl.includes('/video/')) {
+        await page.goBack();
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+      
+      return { success: false, username: finalUsername, error: 'Failed to click Send button' };
+    }
+    
+    console.log(`[DM Creator] ✅ Message sent successfully!`);
+    sendUserEvent(userId, { type: 'success', text: `✅ DM sent to @${finalUsername}` });
+    
+    // Wait a moment for the message to send
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Log the activity
+    try {
+      const connection = await db.getConnection();
+      await connection.query(
+        `INSERT INTO activity_logs (user_id, tiktok_account_id, action_type, target_user, post_url, success, created_at, date)
+         VALUES (?, ?, 'dm_sent', ?, ?, 1, NOW(), CURDATE())`,
+        [userId, accountId, finalUsername, videoUrl]
+      );
+      connection.release();
+      console.log(`[DM Creator] Activity logged`);
+    } catch (logError) {
+      console.error(`[DM Creator] Failed to log activity:`, logError);
+    }
+    
+    // Return to the video page
+    console.log(`[DM Creator] Returning to video...`);
+    await page.goBack(); // Back from chat
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Check if we're on the profile page or video page
+    const currentUrl = page.url();
+    if (!currentUrl.includes('/video/')) {
+      console.log(`[DM Creator] Still on profile, going back once more...`);
+      await page.goBack(); // Back from profile
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+    
+    // Verify we're back on the video page
+    const finalUrl = page.url();
+    if (finalUrl.includes('/video/')) {
+      console.log(`[DM Creator] ✅ Successfully returned to video: ${finalUrl}`);
+    } else {
+      console.log(`[DM Creator] ⚠️ Not on video page, navigating directly...`);
+      await page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+    
+    return { success: true, username: finalUsername };
+    
+  } catch (error) {
+    console.error(`[DM Creator] Error sending DM:`, error);
+    sendUserEvent(userId, { 
+      type: 'warning', 
+      text: `⚠️ Failed to send DM: ${error instanceof Error ? error.message : 'Unknown error'}` 
+    });
+    
+    // Try to return to video page
+    try {
+      await page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    } catch (navError) {
+      console.error(`[DM Creator] Failed to return to video:`, navError);
+    }
+    
+    return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+  }
 }
 
 /**
@@ -714,6 +1031,39 @@ export async function searchTikTokByKeywords(
               
               // Wait additional time for comments section to render
               await new Promise(resolve => setTimeout(resolve, 2000));
+              
+              // NEW: Send DM to video creator before scraping comments
+              console.log(`[TikTok Search] Starting DM send to video creator...`);
+              if (userId) {
+                await updateAutomationCheckpoint(userId, {
+                  accountId: currentAccountId,
+                  keywordIndex,
+                  videoIndex: i,
+                  videoUrl,
+                  stage: 'sending_dm'
+                });
+              }
+              
+              const dmResult = await sendDMToCreator(page, videoUrl, userId, currentAccountId);
+              if (dmResult.success) {
+                console.log(`[TikTok Search] ✅ DM sent successfully to @${dmResult.username}`);
+              } else {
+                console.log(`[TikTok Search] ⚠️ DM send failed: ${dmResult.error}, continuing to comments...`);
+              }
+              
+              // Wait a moment after DM attempt before continuing
+              await new Promise(resolve => setTimeout(resolve, 2000));
+              
+              // Update checkpoint back to comments stage
+              if (userId) {
+                await updateAutomationCheckpoint(userId, {
+                  accountId: currentAccountId,
+                  keywordIndex,
+                  videoIndex: i,
+                  videoUrl,
+                  stage: 'comments'
+                });
+              }
               
               // Click the comments button to reveal the comments section
               console.log(`[TikTok Search] Clicking comments button to reveal comments...`);
