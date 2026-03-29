@@ -8,7 +8,7 @@ const router = Router();
 router.post('/complete', authenticateToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.userId;
-    const { tiktokAccounts, keywords, aiPrompt, exampleDM, exampleComment, openaiKey } = req.body;
+    const { tiktokAccounts, keywords, aiPrompt, creatorMessage, exampleDM, exampleComment, openaiKey } = req.body;
 
     // Validation
     if (!keywords || !aiPrompt || !exampleDM || !exampleComment || !openaiKey) {
@@ -47,16 +47,17 @@ router.post('/complete', authenticateToken, async (req: AuthRequest, res) => {
       // Save configuration
       await connection.query(
         `INSERT INTO user_config 
-         (user_id, keywords, ai_prompt, example_dm, example_comment, openai_api_key, is_onboarding_complete) 
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+         (user_id, keywords, ai_prompt, creator_message, example_dm, example_comment, openai_api_key, is_onboarding_complete) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE 
          keywords = VALUES(keywords),
          ai_prompt = VALUES(ai_prompt),
+         creator_message = VALUES(creator_message),
          example_dm = VALUES(example_dm),
          example_comment = VALUES(example_comment),
          openai_api_key = VALUES(openai_api_key),
          is_onboarding_complete = VALUES(is_onboarding_complete)`,
-        [userId, keywords, aiPrompt, exampleDM, exampleComment, openaiKey, true]
+        [userId, keywords, aiPrompt, creatorMessage || null, exampleDM, exampleComment, openaiKey, true]
       );
 
       // Initialize automation state

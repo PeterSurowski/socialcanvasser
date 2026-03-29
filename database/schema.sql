@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS user_config (
     user_id INT UNIQUE NOT NULL,
     keywords TEXT NOT NULL,
     ai_prompt TEXT NOT NULL,
+    creator_message TEXT DEFAULT NULL,
     example_dm TEXT NOT NULL,
     example_comment TEXT NOT NULL,
     openai_api_key VARCHAR(255) NOT NULL,

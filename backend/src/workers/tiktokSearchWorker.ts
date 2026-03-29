@@ -16,9 +16,6 @@ interface TikTokPost {
   timestamp: Date;
 }
 
-// DM message to send to video creators (no line breaks to prevent premature sending)
-const CREATOR_DM_MESSAGE = `Hey there, you're getting a lot of views on a video you recently posted about peptides. I think you'd be a good fit for the OnlineSupplements.NET's affiliate program. Here's the deal:                       • You get 40% commission (crazy, right?)                    • You get 50% off your own purchases                        • Your customers get 10 percent off                        • All OnlineSupplements.NET customers already get $20 store credit for every $100 they spend plus free shipping on orders over $200                                  If you're interested, just sign up here: https://onlinesupplements.net/affiliates/`;
-
 /**
  * Send a DM to the creator of the video
  * Returns true if successful, false if failed (but doesn't throw)
@@ -27,8 +24,15 @@ async function sendDMToCreator(
   page: Page,
   videoUrl: string,
   userId: number,
-  accountId: number
+  accountId: number,
+  creatorMessage: string | null
 ): Promise<{ success: boolean; username?: string; error?: string }> {
+  // Skip if no creator message configured
+  if (!creatorMessage || creatorMessage.trim() === '') {
+    console.log(`[DM Creator] No creator message configured, skipping DM to creator`);
+    return { success: false, error: 'No creator message configured' };
+  }
+  
   console.log(`[DM Creator] Starting DM send process for ${videoUrl}`);
   
   try {
@@ -206,16 +210,16 @@ async function sendDMToCreator(
     await new Promise(resolve => setTimeout(resolve, 500));
     
     // Type the message using page.type() with delay (simulates human typing, makes Send button appear)
-    console.log(`[DM Creator] Typing message (${CREATOR_DM_MESSAGE.length} characters)...`);
+    console.log(`[DM Creator] Typing message (${creatorMessage.length} characters)...`);
     try {
-      await page.type('.public-DraftEditor-content[contenteditable="true"]', CREATOR_DM_MESSAGE, {
+      await page.type('.public-DraftEditor-content[contenteditable="true"]', creatorMessage, {
         delay: 10 // Small delay between keystrokes to simulate human typing
       });
     } catch (typeErr) {
       // Try generic contenteditable as fallback
       const contentEditables = await page.$$('[contenteditable="true"]');
       if (contentEditables.length > 0) {
-        await contentEditables[0].type(CREATOR_DM_MESSAGE, { delay: 10 });
+        await contentEditables[0].type(creatorMessage, { delay: 10 });
       } else {
         throw typeErr;
       }
@@ -1044,7 +1048,7 @@ export async function searchTikTokByKeywords(
                 });
               }
               
-              const dmResult = await sendDMToCreator(page, videoUrl, userId, currentAccountId);
+              const dmResult = await sendDMToCreator(page, videoUrl, userId, currentAccountId, userConfig.creatorMessage);
               if (dmResult.success) {
                 console.log(`[TikTok Search] ✅ DM sent successfully to @${dmResult.username}`);
               } else {
@@ -2195,7 +2199,7 @@ export async function runTikTokSearchForAccounts(userId: number) {
     
     // Get user's keywords from config
     const [configRows] = await connection.query(
-      'SELECT keywords, ai_prompt, example_dm, example_comment, openai_api_key FROM user_config WHERE user_id = ?',
+      'SELECT keywords, ai_prompt, creator_message, example_dm, example_comment, openai_api_key FROM user_config WHERE user_id = ?',
       [userId]
     );
     
@@ -2216,6 +2220,7 @@ export async function runTikTokSearchForAccounts(userId: number) {
     // Prepare user config for OpenAI
     const userConfig = {
       aiPrompt: configData.ai_prompt,
+      creatorMessage: configData.creator_message,
       exampleDM: configData.example_dm,
       exampleComment: configData.example_comment,
       openaiApiKey: configData.openai_api_key

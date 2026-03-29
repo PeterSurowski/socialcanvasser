@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import TikTokAccounts from '../components/onboarding/TikTokAccounts'
 import Keywords from '../components/onboarding/Keywords'
 import AIPrompt from '../components/onboarding/AIPrompt'
+import CreatorMessage from '../components/onboarding/CreatorMessage'
 import ExampleMessages from '../components/onboarding/ExampleMessages'
 import OpenAIKey from '../components/onboarding/OpenAIKey'
 
@@ -12,13 +13,14 @@ export default function Onboarding() {
     tiktokAccounts: [] as string[],
     keywords: '',
     aiPrompt: '',
+    creatorMessage: '',
     exampleDM: '',
     exampleComment: '',
     openaiKey: '',
   })
   const navigate = useNavigate()
 
-  const totalSteps = 5
+  const totalSteps = 6
 
   const updateData = (field: string, value: any) => {
     setData(prev => ({ ...prev, [field]: value }))
@@ -107,6 +109,14 @@ export default function Onboarding() {
             />
           )}
           {step === 4 && (
+            <CreatorMessage
+              message={data.creatorMessage}
+              onUpdate={(message) => updateData('creatorMessage', message)}
+              onNext={handleNext}
+              onBack={handleBack}
+            />
+          )}
+          {step === 5 && (
             <ExampleMessages
               exampleDM={data.exampleDM}
               exampleComment={data.exampleComment}
@@ -116,7 +126,7 @@ export default function Onboarding() {
               onBack={handleBack}
             />
           )}
-          {step === 5 && (
+          {step === 6 && (
             <OpenAIKey
               apiKey={data.openaiKey}
               onUpdate={(key) => updateData('openaiKey', key)}

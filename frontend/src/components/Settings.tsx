@@ -3,6 +3,7 @@ import React, { useEffect, useState } from 'react'
 interface SettingsData {
   keywords: string;
   ai_prompt: string;
+  creator_message: string;
   example_dm: string;
   example_comment: string;
   openai_api_key: string;
@@ -13,6 +14,7 @@ export default function Settings() {
   const [settings, setSettings] = useState<SettingsData>({
     keywords: '',
     ai_prompt: '',
+    creator_message: '',
     example_dm: '',
     example_comment: '',
     openai_api_key: '',
@@ -39,6 +41,7 @@ export default function Settings() {
         setSettings({
           keywords: data.config.keywords || '',
           ai_prompt: data.config.ai_prompt || '',
+          creator_message: data.config.creator_message || '',
           example_dm: data.config.example_dm || '',
           example_comment: data.config.example_comment || '',
           openai_api_key: data.config.openai_api_key || '',
@@ -69,6 +72,7 @@ export default function Settings() {
         body: JSON.stringify({
           keywords: settings.keywords,
           aiPrompt: settings.ai_prompt,
+          creatorMessage: settings.creator_message,
           exampleDM: settings.example_dm,
           exampleComment: settings.example_comment,
           openaiApiKey: settings.openai_api_key,
@@ -140,6 +144,24 @@ export default function Settings() {
             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             required
           />
+        </div>
+
+        {/* Creator Message */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Creator DM Message
+            <span className="text-gray-500 font-normal ml-2">(sent to video creators before scraping comments)</span>
+          </label>
+          <textarea
+            value={settings.creator_message}
+            onChange={(e) => handleChange('creator_message', e.target.value)}
+            placeholder="Hey there, you're getting a lot of views..."
+            rows={4}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            This message will be sent to each video creator. Leave blank to skip sending messages to creators.
+          </p>
         </div>
 
         {/* Example DM */}

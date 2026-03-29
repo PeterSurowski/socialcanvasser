@@ -10,7 +10,7 @@ router.get('/', authenticateToken, async (req: AuthRequest, res) => {
     const userId = req.userId;
 
     const [config]: any = await db.query(
-      'SELECT keywords, ai_prompt, example_dm, example_comment, openai_api_key FROM user_config WHERE user_id = ?',
+      'SELECT keywords, ai_prompt, creator_message, example_dm, example_comment, openai_api_key FROM user_config WHERE user_id = ?',
       [userId]
     );
 
@@ -48,13 +48,13 @@ router.get('/', authenticateToken, async (req: AuthRequest, res) => {
 router.put('/', authenticateToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.userId;
-    const { keywords, aiPrompt, exampleDM, exampleComment, openaiApiKey, actionsPerSession } = req.body;
+    const { keywords, aiPrompt, creatorMessage, exampleDM, exampleComment, openaiApiKey, actionsPerSession } = req.body;
 
     await db.query(
       `UPDATE user_config 
-       SET keywords = ?, ai_prompt = ?, example_dm = ?, example_comment = ?, openai_api_key = ?
+       SET keywords = ?, ai_prompt = ?, creator_message = ?, example_dm = ?, example_comment = ?, openai_api_key = ?
        WHERE user_id = ?`,
-      [keywords, aiPrompt, exampleDM, exampleComment, openaiApiKey, userId]
+      [keywords, aiPrompt, creatorMessage, exampleDM, exampleComment, openaiApiKey, userId]
     );
 
     // Update actions_per_session for all user's TikTok accounts
