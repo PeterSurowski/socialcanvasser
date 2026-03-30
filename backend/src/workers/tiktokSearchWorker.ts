@@ -125,7 +125,7 @@ async function sendDMToCreator(
     console.log(`[DM Creator] Navigating to profile...`);
     const profileUrl = `https://www.tiktok.com/@${finalUsername}`;
     try {
-      await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await page.goto(profileUrl, { waitUntil: 'networkidle2', timeout: 20000 });
       console.log(`[DM Creator] Navigated to ${profileUrl}`);
     } catch (navError) {
       console.log(`[DM Creator] ⚠️ Could not navigate to profile: ${navError}`);
@@ -133,10 +133,15 @@ async function sendDMToCreator(
       return { success: false, username: finalUsername, error: 'Profile navigation failed' };
     }
     
-    // Wait for profile page to load
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    await page.waitForSelector('[data-e2e="user-page"], [data-e2e="user-post-item"]', { timeout: 10000 });
-    console.log(`[DM Creator] Profile page loaded`);
+    // Wait for profile page to fully render with generous timeout
+    try {
+      await page.waitForSelector('[data-e2e="user-page"], [data-e2e="user-post-item"]', { timeout: 15000 });
+      console.log(`[DM Creator] Profile page loaded`);
+    } catch (waitError) {
+      console.log(`[DM Creator] ⚠️ Profile elements didn't load - may be restricted or bot-detected`);
+      sendUserEvent(userId, { type: 'warning', text: `⚠️ Could not access @${finalUsername}'s profile` });
+      return { success: false, username: finalUsername, error: 'Profile elements not found' };
+    }
     
     // Look for the Message button (use data-e2e attribute to avoid navigation button)
     const messageButtonFound = await page.evaluate(() => {
