@@ -1041,39 +1041,6 @@ export async function searchTikTokByKeywords(
               // Wait additional time for comments section to render
               await new Promise(resolve => setTimeout(resolve, 2000));
               
-              // NEW: Send DM to video creator before scraping comments
-              console.log(`[TikTok Search] Starting DM send to video creator...`);
-              if (userId) {
-                await updateAutomationCheckpoint(userId, {
-                  accountId: currentAccountId,
-                  keywordIndex,
-                  videoIndex: i,
-                  videoUrl,
-                  stage: 'sending_dm'
-                });
-              }
-              
-              const dmResult = await sendDMToCreator(page, videoUrl, userId, currentAccountId, userConfig.creatorMessage);
-              if (dmResult.success) {
-                console.log(`[TikTok Search] ✅ DM sent successfully to @${dmResult.username}`);
-              } else {
-                console.log(`[TikTok Search] ⚠️ DM send failed: ${dmResult.error}, continuing to comments...`);
-              }
-              
-              // Wait a moment after DM attempt before continuing
-              await new Promise(resolve => setTimeout(resolve, 2000));
-              
-              // Update checkpoint back to comments stage
-              if (userId) {
-                await updateAutomationCheckpoint(userId, {
-                  accountId: currentAccountId,
-                  keywordIndex,
-                  videoIndex: i,
-                  videoUrl,
-                  stage: 'comments'
-                });
-              }
-              
               // Click the comments button to reveal the comments section
               console.log(`[TikTok Search] Clicking comments button to reveal comments...`);
               try {

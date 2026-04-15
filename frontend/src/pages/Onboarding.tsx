@@ -6,6 +6,9 @@ import AIPrompt from '../components/onboarding/AIPrompt'
 import CreatorMessage from '../components/onboarding/CreatorMessage'
 import ExampleMessages from '../components/onboarding/ExampleMessages'
 import OpenAIKey from '../components/onboarding/OpenAIKey'
+import BrandVoice from '../components/onboarding/BrandVoice'
+import SnoozeSettings from '../components/onboarding/SnoozeSettings'
+import AffiliateInvitationText from '../components/onboarding/AffiliateInvitationText'
 
 export default function Onboarding() {
   const [step, setStep] = useState(1)
@@ -17,10 +20,13 @@ export default function Onboarding() {
     exampleDM: '',
     exampleComment: '',
     openaiKey: '',
+    brandVoice: '',
+    snoozeDays: 3,
+    affiliateInvitationText: '',
   })
   const navigate = useNavigate()
 
-  const totalSteps = 6
+  const totalSteps = 9
 
   const updateData = (field: string, value: any) => {
     setData(prev => ({ ...prev, [field]: value }))
@@ -130,6 +136,30 @@ export default function Onboarding() {
             <OpenAIKey
               apiKey={data.openaiKey}
               onUpdate={(key) => updateData('openaiKey', key)}
+              onComplete={handleNext}
+              onBack={handleBack}
+            />
+          )}
+          {step === 7 && (
+            <BrandVoice
+              brandVoice={data.brandVoice}
+              onUpdate={(v) => updateData('brandVoice', v)}
+              onNext={handleNext}
+              onBack={handleBack}
+            />
+          )}
+          {step === 8 && (
+            <SnoozeSettings
+              snoozeDays={data.snoozeDays}
+              onUpdate={(v) => updateData('snoozeDays', v)}
+              onNext={handleNext}
+              onBack={handleBack}
+            />
+          )}
+          {step === 9 && (
+            <AffiliateInvitationText
+              affiliateInvitationText={data.affiliateInvitationText}
+              onUpdate={(v) => updateData('affiliateInvitationText', v)}
               onComplete={handleComplete}
               onBack={handleBack}
             />

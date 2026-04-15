@@ -53,7 +53,7 @@ export async function recordContact(
 export async function logActivity(
   userId: number,
   accountId: number,
-  actionType: 'dm_sent' | 'comment_posted',
+  actionType: 'dm_sent' | 'comment_posted' | 'affiliate_dm_sent' | 'affiliate_comment_posted',
   targetUser: string,
   postUrl: string,
   messageContent: string,

@@ -14,10 +14,11 @@ interface Account {
 
 export default function Dashboard() {
   const [running, setRunning] = useState(false)
+  const [affiliateRunning, setAffiliateRunning] = useState(false)
   const [accounts, setAccounts] = useState<Account[]>([])
   const [needsSetup, setNeedsSetup] = useState<Account[]>([])
   const [showSetupModal, setShowSetupModal] = useState(false)
-  const [activeTab, setActiveTab] = useState<'overview' | 'settings'>('overview')
+  const [activeTab, setActiveTab] = useState<'overview' | 'settings' | 'affiliate'>('overview')
 
   const fetchAccounts = async () => {
     const token = localStorage.getItem('token')
@@ -72,6 +73,22 @@ export default function Dashboard() {
     }
   }
 
+  const startAffiliate = async () => {
+    const token = localStorage.getItem('token')
+    const res = await fetch('/api/dashboard/affiliate/start', { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+    if (res.ok) {
+      setAffiliateRunning(true)
+    }
+  }
+
+  const stopAffiliate = async () => {
+    const token = localStorage.getItem('token')
+    const res = await fetch('/api/dashboard/affiliate/stop', { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+    if (res.ok) {
+      setAffiliateRunning(false)
+    }
+  }
+
   useEffect(() => {
     fetchAccounts()
   }, [])
@@ -86,6 +103,28 @@ export default function Dashboard() {
           </div>
           {activeTab === 'overview' && (
             <DashboardControls onStart={start} onStop={stop} running={running} />
+          )}
+          {activeTab === 'affiliate' && (
+            <div className="flex items-center gap-3">
+              <span className={`px-3 py-1 rounded-full text-sm font-medium ${affiliateRunning ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}`}>
+                {affiliateRunning ? '🟢 Running' : '⚫ Stopped'}
+              </span>
+              {!affiliateRunning ? (
+                <button
+                  onClick={startAffiliate}
+                  className="px-5 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 font-semibold"
+                >
+                  Start Affiliate
+                </button>
+              ) : (
+                <button
+                  onClick={stopAffiliate}
+                  className="px-5 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-semibold"
+                >
+                  Stop Affiliate
+                </button>
+              )}
+            </div>
           )}
         </div>
 
@@ -103,6 +142,16 @@ export default function Dashboard() {
               Overview
             </button>
             <button
+              onClick={() => setActiveTab('affiliate')}
+              className={`py-2 px-1 border-b-2 font-medium text-sm ${
+                activeTab === 'affiliate'
+                  ? 'border-purple-600 text-purple-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              Affiliate Procurement
+            </button>
+            <button
               onClick={() => setActiveTab('settings')}
               className={`py-2 px-1 border-b-2 font-medium text-sm ${
                 activeTab === 'settings'
@@ -116,7 +165,7 @@ export default function Dashboard() {
         </div>
 
         {/* Tab Content */}
-        {activeTab === 'overview' ? (
+        {activeTab === 'overview' && (
           <>
             {/* Setup Warning Banner */}
             {needsSetup.length > 0 && (
@@ -153,7 +202,68 @@ export default function Dashboard() {
               <StatsPanel accounts={accounts} onRefreshAccounts={fetchAccounts} />
             </div>
           </>
-        ) : (
+        )}
+
+        {/* Affiliate Procurement Tab */}
+        {activeTab === 'affiliate' && (
+          <div className="bg-white rounded-lg shadow-sm p-8 max-w-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <span className="text-3xl">🤝</span>
+              <div>
+                <h2 className="text-xl font-bold text-gray-800">Affiliate Procurement</h2>
+                <p className="text-sm text-gray-500">
+                  Automatically comment on creator videos and send affiliate invitation DMs
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-purple-50 border border-purple-200 rounded-lg p-4 mb-6 text-sm text-purple-800">
+              <strong>How it works:</strong>
+              <ol className="list-decimal list-inside mt-2 space-y-1">
+                <li>Searches TikTok for your keywords</li>
+                <li>Navigates to each video, likes it, and reads the comments</li>
+                <li>Posts a brand-voice-aligned AI comment</li>
+                <li>Adds the creator as a prospect on that account</li>
+                <li>After the snooze period expires, sends your affiliate invitation DM</li>
+              </ol>
+            </div>
+
+            <div className={`flex items-center gap-3 p-4 rounded-lg mb-6 ${affiliateRunning ? 'bg-green-50 border border-green-200' : 'bg-gray-50 border border-gray-200'}`}>
+              <div className={`w-3 h-3 rounded-full ${affiliateRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
+              <span className="font-medium text-gray-700">
+                {affiliateRunning ? 'Affiliate Procurement is running…' : 'Affiliate Procurement is stopped'}
+              </span>
+            </div>
+
+            <div className="flex gap-4">
+              <button
+                onClick={startAffiliate}
+                disabled={affiliateRunning}
+                className="px-6 py-3 bg-purple-600 text-white rounded-lg font-semibold hover:bg-purple-700 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                ▶ Start
+              </button>
+              <button
+                onClick={stopAffiliate}
+                disabled={!affiliateRunning}
+                className="px-6 py-3 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                ■ Stop
+              </button>
+            </div>
+
+            <p className="text-xs text-gray-400 mt-4">
+              Configure brand voice, snooze days, and the invitation message under the{' '}
+              <button onClick={() => setActiveTab('settings')} className="text-blue-500 underline">
+                Settings
+              </button>{' '}
+              tab.
+            </p>
+          </div>
+        )}
+
+        {/* Settings Tab */}
+        {activeTab === 'settings' && (
           <Settings />
         )}
       </div>

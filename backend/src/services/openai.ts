@@ -162,3 +162,57 @@ REQUIREMENTS:
     throw error;
   }
 }
+
+/**
+ * Generate a brand-voice-aligned comment for a TikTok video based on its caption and existing comments
+ */
+export async function generateAffiliateComment(
+  caption: string,
+  comments: string[],
+  brandVoice: string,
+  openaiApiKey: string
+): Promise<string> {
+  const openai = new OpenAI({ apiKey: openaiApiKey });
+
+  const systemPrompt = `You are an expert social media content creator. Your job is to write a TikTok comment that sounds natural and human — NOT like a sales pitch or bot.
+
+Brand Voice / Persona:
+${brandVoice}
+
+Rules:
+- The comment must be genuine, conversational, and engaging
+- Max 150 characters
+- Do NOT mention products, pricing, or promotions explicitly
+- Reference something specific from the video caption or existing comments to seem authentic
+- End with something that invites a response (question, relatable observation, etc.)
+- Return ONLY the comment text — no quotes, no explanation`;
+
+  const existingCommentsText = comments.slice(0, 10).map((c, i) => `${i + 1}. "${c}"`).join('\n');
+
+  const userPrompt = `Video Caption: "${caption}"
+
+Top comments on this video:
+${existingCommentsText || '(no comments yet)'}
+
+Write a single, natural comment in the brand voice described above. Return only the comment text.`;
+
+  try {
+    console.log(`[OpenAI] Generating affiliate comment...`);
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      temperature: 0.8,
+      max_tokens: 100
+    });
+
+    const text = (completion.choices[0].message.content || '').trim().replace(/^"|"$/g, '');
+    console.log(`[OpenAI] ✅ Generated comment: "${text}"`);
+    return text;
+  } catch (error) {
+    console.error('[OpenAI] Error generating affiliate comment:', error);
+    throw error;
+  }
+}

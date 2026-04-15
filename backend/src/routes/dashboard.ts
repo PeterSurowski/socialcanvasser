@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 import { subscribe, sendUserEvent } from '../events/broadcaster.js';
 import { runTikTokSearchForAccounts } from '../workers/tiktokSearchWorker.js';
 import { runTikTokFeedForAccounts } from '../workers/tiktokFeedWorker.js';
+import { runAffiliateProcurementForAccounts, setAffiliateRunning } from '../workers/affiliateProcurementWorker.js';
 
 const router = Router();
 
@@ -306,6 +307,52 @@ router.post('/stop', async (req: any, res) => {
     res.json({ message: 'Stopped' })
   } catch (err) {
     console.error('Stop error', err)
+    res.status(500).json({ message: 'Server error' })
+  }
+})
+
+// Start affiliate procurement
+router.post('/affiliate/start', async (req: any, res) => {
+  try {
+    const token = req.headers['authorization'] ? String(req.headers['authorization']).split(' ')[1] : ''
+    if (!token) return res.status(401).json({ message: 'Authentication required' })
+    const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret')
+    const userId = decoded.userId
+
+    await setAffiliateRunning(userId, true)
+    sendUserEvent(userId, { type: 'status', text: '🤝 Starting Affiliate Procurement...' })
+
+    // Run async — don't await
+    runAffiliateProcurementForAccounts(userId)
+      .then(() => {
+        setAffiliateRunning(userId, false);
+        sendUserEvent(userId, { type: 'success', text: '✅ Affiliate Procurement cycle completed!' });
+      })
+      .catch(err => {
+        setAffiliateRunning(userId, false);
+        sendUserEvent(userId, { type: 'error', text: `Affiliate failed: ${err.message}` });
+      });
+
+    res.json({ message: 'Affiliate Procurement started' })
+  } catch (err) {
+    console.error('Affiliate start error', err)
+    res.status(500).json({ message: 'Server error' })
+  }
+})
+
+// Stop affiliate procurement
+router.post('/affiliate/stop', async (req: any, res) => {
+  try {
+    const token = req.headers['authorization'] ? String(req.headers['authorization']).split(' ')[1] : ''
+    if (!token) return res.status(401).json({ message: 'Authentication required' })
+    const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret')
+    const userId = decoded.userId
+
+    await setAffiliateRunning(userId, false)
+    sendUserEvent(userId, { type: 'status', text: '🔴 Affiliate Procurement stopped' })
+    res.json({ message: 'Affiliate Procurement stopped' })
+  } catch (err) {
+    console.error('Affiliate stop error', err)
     res.status(500).json({ message: 'Server error' })
   }
 })

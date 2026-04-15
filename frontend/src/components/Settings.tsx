@@ -8,6 +8,9 @@ interface SettingsData {
   example_comment: string;
   openai_api_key: string;
   actions_per_session: number;
+  brand_voice: string;
+  snooze_days: number;
+  affiliate_invitation_text: string;
 }
 
 export default function Settings() {
@@ -18,7 +21,10 @@ export default function Settings() {
     example_dm: '',
     example_comment: '',
     openai_api_key: '',
-    actions_per_session: 20
+    actions_per_session: 20,
+    brand_voice: '',
+    snooze_days: 3,
+    affiliate_invitation_text: '',
   })
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -45,7 +51,10 @@ export default function Settings() {
           example_dm: data.config.example_dm || '',
           example_comment: data.config.example_comment || '',
           openai_api_key: data.config.openai_api_key || '',
-          actions_per_session: data.config.actions_per_session || 20
+          actions_per_session: data.config.actions_per_session || 20,
+          brand_voice: data.config.brand_voice || '',
+          snooze_days: data.config.snooze_days ?? 3,
+          affiliate_invitation_text: data.config.affiliate_invitation_text || '',
         })
       }
     } catch (error) {
@@ -76,7 +85,10 @@ export default function Settings() {
           exampleDM: settings.example_dm,
           exampleComment: settings.example_comment,
           openaiApiKey: settings.openai_api_key,
-          actionsPerSession: settings.actions_per_session
+          actionsPerSession: settings.actions_per_session,
+          brandVoice: settings.brand_voice,
+          snoozeDays: settings.snooze_days,
+          affiliateInvitationText: settings.affiliate_invitation_text,
         })
       })
 
@@ -212,6 +224,66 @@ export default function Settings() {
           />
           <p className="text-xs text-gray-500 mt-1">
             After sending this many messages, the system will automatically switch to your next TikTok account
+          </p>
+        </div>
+
+        {/* ─── Affiliate Procurement ─── */}
+        <div className="pt-6 border-t border-gray-200">
+          <h3 className="text-lg font-semibold text-gray-800 mb-1">Affiliate Procurement Settings</h3>
+          <p className="text-sm text-gray-500 mb-4">
+            Used by the Affiliate Procurement algorithm to comment on creator videos and send
+            affiliate invitation DMs.
+          </p>
+        </div>
+
+        {/* Brand Voice */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Brand Voice
+            <span className="text-gray-500 font-normal ml-2">(how the AI should sound when commenting)</span>
+          </label>
+          <textarea
+            value={settings.brand_voice}
+            onChange={(e) => handleChange('brand_voice', e.target.value)}
+            placeholder="Friendly fitness coach. Warm, encouraging, never salesy. Use light humour. Ask genuine questions."
+            rows={4}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+        </div>
+
+        {/* Snooze Days */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Days to wait before sending affiliate DM
+          </label>
+          <input
+            type="number"
+            min="1"
+            max="30"
+            value={settings.snooze_days}
+            onChange={(e) => handleChange('snooze_days', parseInt(e.target.value) || 3)}
+            className="w-32 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            After commenting on a creator&apos;s video, wait this many days before DMing them
+          </p>
+        </div>
+
+        {/* Affiliate Invitation Text */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Affiliate Invitation DM
+            <span className="text-gray-500 font-normal ml-2">(sent once per creator after snooze expires)</span>
+          </label>
+          <textarea
+            value={settings.affiliate_invitation_text}
+            onChange={(e) => handleChange('affiliate_invitation_text', e.target.value)}
+            placeholder="Hey! We noticed your content and think you'd make a great affiliate partner. We offer X% commission and…"
+            rows={5}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            Leave blank to skip DM invitations and only have the bot comment on videos
           </p>
         </div>
 

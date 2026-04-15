@@ -8,7 +8,7 @@ const router = Router();
 router.post('/complete', authenticateToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.userId;
-    const { tiktokAccounts, keywords, aiPrompt, creatorMessage, exampleDM, exampleComment, openaiKey } = req.body;
+    const { tiktokAccounts, keywords, aiPrompt, creatorMessage, exampleDM, exampleComment, openaiKey, brandVoice, snoozeDays, affiliateInvitationText } = req.body;
 
     // Validation
     if (!keywords || !aiPrompt || !exampleDM || !exampleComment || !openaiKey) {
@@ -47,8 +47,8 @@ router.post('/complete', authenticateToken, async (req: AuthRequest, res) => {
       // Save configuration
       await connection.query(
         `INSERT INTO user_config 
-         (user_id, keywords, ai_prompt, creator_message, example_dm, example_comment, openai_api_key, is_onboarding_complete) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         (user_id, keywords, ai_prompt, creator_message, example_dm, example_comment, openai_api_key, is_onboarding_complete, brand_voice, snooze_days, affiliate_invitation_text) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE 
          keywords = VALUES(keywords),
          ai_prompt = VALUES(ai_prompt),
@@ -56,8 +56,11 @@ router.post('/complete', authenticateToken, async (req: AuthRequest, res) => {
          example_dm = VALUES(example_dm),
          example_comment = VALUES(example_comment),
          openai_api_key = VALUES(openai_api_key),
-         is_onboarding_complete = VALUES(is_onboarding_complete)`,
-        [userId, keywords, aiPrompt, creatorMessage || null, exampleDM, exampleComment, openaiKey, true]
+         is_onboarding_complete = VALUES(is_onboarding_complete),
+         brand_voice = VALUES(brand_voice),
+         snooze_days = VALUES(snooze_days),
+         affiliate_invitation_text = VALUES(affiliate_invitation_text)`,
+        [userId, keywords, aiPrompt, creatorMessage || null, exampleDM, exampleComment, openaiKey, true, brandVoice || null, snoozeDays || 3, affiliateInvitationText || null]
       );
 
       // Initialize automation state
