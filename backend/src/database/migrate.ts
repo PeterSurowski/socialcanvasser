@@ -1,5 +1,6 @@
 import fs from 'fs/promises'
 import path from 'path'
+import { fileURLToPath } from 'url'
 import db from '../config/database.js'
 
 async function ensureMigrationsTable(connection: any) {
@@ -12,8 +13,45 @@ async function ensureMigrationsTable(connection: any) {
   `)
 }
 
+function isSkippableMigrationError(err: any) {
+  const code = err?.code
+  return [
+    'ER_DUP_FIELDNAME',
+    'ER_TABLE_EXISTS_ERROR',
+    'ER_DUP_KEYNAME',
+    'ER_DUP_ENTRY',
+    'ER_FK_DUP_NAME',
+    'ER_MULTIPLE_PRI_KEY'
+  ].includes(code)
+}
+
+async function resolveMigrationsDir() {
+  const currentFile = fileURLToPath(import.meta.url)
+  const currentDir = path.dirname(currentFile)
+
+  const candidates = [
+    path.resolve(process.cwd(), 'database', 'migrations'),
+    path.resolve(process.cwd(), '..', 'database', 'migrations'),
+    path.resolve(currentDir, '..', '..', '..', 'database', 'migrations'),
+    path.resolve(currentDir, '..', '..', 'database', 'migrations')
+  ]
+
+  for (const candidate of candidates) {
+    try {
+      const stat = await fs.stat(candidate)
+      if (stat.isDirectory()) {
+        return candidate
+      }
+    } catch {
+      // Try next candidate
+    }
+  }
+
+  throw new Error(`Could not locate database/migrations directory. Checked: ${candidates.join(', ')}`)
+}
+
 async function runMigrations() {
-  const migrationsDir = path.resolve(process.cwd(), 'database', 'migrations')
+  const migrationsDir = await resolveMigrationsDir()
   const files = await fs.readdir(migrationsDir).catch(() => [])
   files.sort()
 
@@ -43,7 +81,15 @@ async function runMigrations() {
         // Execute statements; split on semicolon and run non-empty statements.
         const parts = sql.split(';').map(s => s.trim()).filter(Boolean)
         for (const stmt of parts) {
-          await connection.query(stmt)
+          try {
+            await connection.query(stmt)
+          } catch (err) {
+            if (isSkippableMigrationError(err)) {
+              console.log(`Skipping already-applied statement in ${file}: ${err instanceof Error ? err.message : String(err)}`)
+              continue
+            }
+            throw err
+          }
         }
 
         await connection.query('INSERT INTO migrations_applied (filename) VALUES (?)', [file])

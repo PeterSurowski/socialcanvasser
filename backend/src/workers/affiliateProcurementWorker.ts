@@ -348,6 +348,55 @@ async function openCommentsPanel(page: Page): Promise<void> {
   }
 }
 
+/**
+ * Wait for TikTok search results to render and extract video URLs robustly.
+ */
+async function getSearchVideoUrls(page: Page, keyword: string): Promise<string[]> {
+  // Give TikTok time to mount actual cards after skeleton placeholders
+  await new Promise(resolve => setTimeout(resolve, 2500));
+
+  try {
+    await page.waitForFunction(
+      () => {
+        const skeletons = document.querySelectorAll('[data-e2e="video-skeleton-container"]');
+        const cards = document.querySelectorAll('[data-e2e="search_top-item"], [data-e2e="feed-video"]');
+        const links = document.querySelectorAll('a[href*="/video/"]');
+        return (skeletons.length === 0 && cards.length > 0) || links.length > 0;
+      },
+      { timeout: 15000 }
+    );
+  } catch {
+    console.log(`[Affiliate Worker] Search results render wait timed out for keyword "${keyword}"`);
+  }
+
+  // Scroll a few times to force lazy-loaded cards to appear
+  for (let i = 0; i < 4; i++) {
+    await page.evaluate(() => {
+      window.scrollBy(0, window.innerHeight * 0.9);
+    });
+    await new Promise(resolve => setTimeout(resolve, 1200));
+  }
+
+  const rawUrls: string[] = await page.evaluate(() => {
+    const candidates = Array.from(document.querySelectorAll('a[href*="/video/"]')) as HTMLAnchorElement[];
+    return candidates
+      .map(link => link.getAttribute('href') || '')
+      .filter(Boolean)
+      .slice(0, 120);
+  });
+
+  // Dedupe while preserving order
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const url of rawUrls) {
+    if (seen.has(url)) continue;
+    seen.add(url);
+    unique.push(url);
+  }
+
+  return unique;
+}
+
 // ---------------------------------------------------------------------------
 // Main worker
 // ---------------------------------------------------------------------------
@@ -514,25 +563,54 @@ export async function runAffiliateProcurementForAccounts(userId: number): Promis
           console.log(`[Affiliate Worker] Navigation timeout for search, continuing anyway...`);
         }
 
-        await new Promise(resolve => setTimeout(resolve, 3000));
-
-        // Extract video URLs from search results
-        const videoResults: { href: string }[] = await page.evaluate(() => {
-          const items = Array.from(
-            document.querySelectorAll('[data-e2e="search_top-item"], [data-e2e="feed-video"]')
-          );
-          return items
-            .slice(0, 50)
-            .map(item => {
-              const link = item.querySelector('a[href*="/video/"]') as HTMLAnchorElement | null;
-              return { href: link?.getAttribute('href') || '' };
-            })
-            .filter(r => r.href);
+        const searchPageInfo = await page.evaluate(() => {
+          return {
+            url: window.location.href,
+            title: document.title,
+            isLoginPrompt: document.body.innerText.includes('Log in to TikTok') || document.body.innerText.includes('Sign up for TikTok'),
+            isErrorPage: document.body.innerText.includes('Something went wrong') || document.body.innerText.includes('Try again later')
+          };
         });
+
+        if (searchPageInfo.isLoginPrompt) {
+          console.log(`[Affiliate Worker] ⚠️ Login prompt detected on search page for keyword "${keyword}"`);
+          sendUserEvent(userId, {
+            type: 'warning',
+            text: `⚠️ TikTok login required on @${account.account_identifier}. Skipping account.`
+          });
+          continue;
+        }
+
+        if (searchPageInfo.isErrorPage) {
+          console.log(`[Affiliate Worker] ⚠️ TikTok error page detected for keyword "${keyword}"`);
+          sendUserEvent(userId, {
+            type: 'warning',
+            text: `⚠️ TikTok blocked search temporarily on @${account.account_identifier}.`
+          });
+        }
+
+        const videoHrefs = await getSearchVideoUrls(page, keyword);
+        const videoResults = videoHrefs.map(href => ({ href }));
 
         console.log(
           `[Affiliate Worker] Found ${videoResults.length} videos for keyword "${keyword}"`
         );
+
+        if (videoResults.length === 0) {
+          const debugCounts = await page.evaluate(() => {
+            return {
+              searchCards: document.querySelectorAll('[data-e2e="search_top-item"]').length,
+              feedCards: document.querySelectorAll('[data-e2e="feed-video"]').length,
+              videoLinks: document.querySelectorAll('a[href*="/video/"]').length,
+              skeletons: document.querySelectorAll('[data-e2e="video-skeleton-container"]').length
+            };
+          });
+          console.log(`[Affiliate Worker] Search debug counts for "${keyword}":`, debugCounts);
+          sendUserEvent(userId, {
+            type: 'info',
+            text: `ℹ️ No videos found for "${keyword}" on @${account.account_identifier}`
+          });
+        }
 
         for (const videoEl of videoResults) {
           if (!(await isAffiliateAutomationRunning(userId))) return;
