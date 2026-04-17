@@ -235,7 +235,7 @@ async function sendDMToCreator(
     // CRITICAL: Send button only appears AFTER text is entered
     console.log(`[DM Creator] Waiting for Send button to appear...`);
     try {
-      await page.waitForSelector('[data-e2e="message-send"]', {
+      await page.waitForSelector('[data-e2e="message-send"], [data-e2e="dm-new-send-btn"]', {
         timeout: 5000,
         visible: true
       });
@@ -259,7 +259,7 @@ async function sendDMToCreator(
     // Click the send button
     console.log(`[DM Creator] Clicking Send button...`);
     try {
-      await page.click('[data-e2e="message-send"]');
+      await page.click('[data-e2e="message-send"], [data-e2e="dm-new-send-btn"]');
       console.log(`[DM Creator] ✅ Send button clicked!`);
     } catch (clickError) {
       console.log(`[DM Creator] ❌ Failed to click Send button:`, clickError);

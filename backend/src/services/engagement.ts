@@ -373,7 +373,7 @@ export async function tryToSendDM(
     
     // CRITICAL: Send button only appears AFTER text is entered
     try {
-      await page.waitForSelector('[data-e2e="message-send"]', {
+      await page.waitForSelector('[data-e2e="message-send"], [data-e2e="dm-new-send-btn"]', {
         timeout: 5000,
         visible: true
       });
@@ -390,7 +390,7 @@ export async function tryToSendDM(
     // Click send button (it's an SVG, use page.click() not evaluate)
     console.log(`[Engagement] Clicking Send button...`);
     try {
-      await page.click('[data-e2e="message-send"]');
+      await page.click('[data-e2e="message-send"], [data-e2e="dm-new-send-btn"]');
       console.log(`[Engagement] ✅ Send button clicked!`);
     } catch (clickError) {
       console.log(`[Engagement] ❌ Failed to click Send button:`, clickError);

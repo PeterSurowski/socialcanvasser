@@ -139,6 +139,72 @@ async function markProspectDmSent(prospectId: number): Promise<void> {
   }
 }
 
+async function markProspectDmSentByUsername(userId: number, username: string): Promise<void> {
+  const connection = await db.getConnection();
+  try {
+    await connection.query(
+      `UPDATE affiliate_prospects
+       SET dm_sent = TRUE, dm_sent_at = NOW()
+       WHERE user_id = ? AND tiktok_username = ?`,
+      [userId, username]
+    );
+  } finally {
+    connection.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Affiliate run-state persistence (account rotation + keyword index)
+// ---------------------------------------------------------------------------
+
+interface AffiliateRunState {
+  keywordIndex: number;
+  lastAccountId: number | null;
+}
+
+async function loadAffiliateState(userId: number): Promise<AffiliateRunState> {
+  const connection = await db.getConnection();
+  try {
+    const [rows] = await connection.query(
+      `SELECT affiliate_keyword_index, affiliate_last_account_id
+       FROM automation_state WHERE user_id = ? LIMIT 1`,
+      [userId]
+    );
+    const row = (rows as any[])[0];
+    return {
+      keywordIndex: row?.affiliate_keyword_index ?? 0,
+      lastAccountId: row?.affiliate_last_account_id ?? null
+    };
+  } catch {
+    // Column may not exist yet (migration pending) — safe default
+    return { keywordIndex: 0, lastAccountId: null };
+  } finally {
+    connection.release();
+  }
+}
+
+async function saveAffiliateState(
+  userId: number,
+  keywordIndex: number,
+  lastAccountId: number
+): Promise<void> {
+  const connection = await db.getConnection();
+  try {
+    await connection.query(
+      `INSERT INTO automation_state (user_id, affiliate_keyword_index, affiliate_last_account_id)
+       VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         affiliate_keyword_index   = VALUES(affiliate_keyword_index),
+         affiliate_last_account_id = VALUES(affiliate_last_account_id)`,
+      [userId, keywordIndex, lastAccountId]
+    );
+  } catch {
+    // Non-fatal — state save failure shouldn't crash the worker
+  } finally {
+    connection.release();
+  }
+}
+
 async function snoozeProspect(prospectId: number, snoozeDays: number): Promise<void> {
   const connection = await db.getConnection();
   try {
@@ -348,10 +414,26 @@ async function openCommentsPanel(page: Page): Promise<void> {
   }
 }
 
+interface SearchVideoCandidate {
+  href: string;
+  creatorUsername: string;
+  profileUrl: string;
+}
+
+function normalizeTikTokUrl(href: string): string {
+  return href.startsWith('http') ? href : `https://www.tiktok.com${href}`;
+}
+
+function extractCreatorUsernameFromVideoHref(href: string): string | null {
+  const match = href.match(/\/@([^/?]+)/);
+  if (!match || !match[1]) return null;
+  return match[1];
+}
+
 /**
- * Wait for TikTok search results to render and extract video URLs robustly.
+ * Wait for TikTok search results to render and extract creator/video candidates robustly.
  */
-async function getSearchVideoUrls(page: Page, keyword: string): Promise<string[]> {
+async function getSearchVideoCandidates(page: Page, keyword: string): Promise<SearchVideoCandidate[]> {
   // Give TikTok time to mount actual cards after skeleton placeholders
   await new Promise(resolve => setTimeout(resolve, 2500));
 
@@ -378,23 +460,89 @@ async function getSearchVideoUrls(page: Page, keyword: string): Promise<string[]
   }
 
   const rawUrls: string[] = await page.evaluate(() => {
-    const candidates = Array.from(document.querySelectorAll('a[href*="/video/"]')) as HTMLAnchorElement[];
-    return candidates
+    // Strictly use search cards first to avoid unrelated links from sidebars/suggestions.
+    const cards = Array.from(document.querySelectorAll('[data-e2e="search_top-item"], [data-e2e="feed-video"]'));
+
+    const cardUrls = cards
+      .map(card => {
+        const link = card.querySelector('a[href*="/video/"]') as HTMLAnchorElement | null;
+        return link?.getAttribute('href') || '';
+      })
+      .filter(Boolean);
+
+    if (cardUrls.length > 0) {
+      return cardUrls.slice(0, 120);
+    }
+
+    // Conservative fallback: first visible top-level video links only.
+    const fallback = Array.from(document.querySelectorAll('a[href*="/video/"]')) as HTMLAnchorElement[];
+    return fallback
       .map(link => link.getAttribute('href') || '')
       .filter(Boolean)
       .slice(0, 120);
   });
 
-  // Dedupe while preserving order
+  // Dedupe while preserving order, then attach creator/profile metadata.
+  // Also dedupe by creator so we process the first visible video per creator.
   const seen = new Set<string>();
-  const unique: string[] = [];
+  const seenCreators = new Set<string>();
+  const unique: SearchVideoCandidate[] = [];
   for (const url of rawUrls) {
     if (seen.has(url)) continue;
     seen.add(url);
-    unique.push(url);
+
+    const creatorUsername = extractCreatorUsernameFromVideoHref(url);
+    if (!creatorUsername) continue;
+    if (seenCreators.has(creatorUsername.toLowerCase())) continue;
+    seenCreators.add(creatorUsername.toLowerCase());
+
+    unique.push({
+      href: url,
+      creatorUsername,
+      profileUrl: `https://www.tiktok.com/@${creatorUsername}`
+    });
   }
 
   return unique;
+}
+
+/**
+ * On a creator profile page, collect visible video links and return unique URLs.
+ */
+async function getProfileVideoUrls(page: Page): Promise<string[]> {
+  await new Promise(resolve => setTimeout(resolve, 2000));
+
+  for (let i = 0; i < 3; i++) {
+    await page.evaluate(() => {
+      window.scrollBy(0, window.innerHeight * 0.85);
+    });
+    await new Promise(resolve => setTimeout(resolve, 1200));
+  }
+
+  const hrefs: string[] = await page.evaluate(() => {
+    const links = Array.from(document.querySelectorAll('a[href*="/video/"]')) as HTMLAnchorElement[];
+    return links.map(link => link.getAttribute('href') || '').filter(Boolean).slice(0, 80);
+  });
+
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const href of hrefs) {
+    const normalized = normalizeTikTokUrl(href);
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    unique.push(normalized);
+  }
+  return unique;
+}
+
+async function getProfileVideoUrlsForCreator(page: Page, creatorUsername: string): Promise<string[]> {
+  const allProfileUrls = await getProfileVideoUrls(page);
+  const creatorLower = creatorUsername.toLowerCase();
+
+  return allProfileUrls.filter(url => {
+    const lower = url.toLowerCase();
+    return lower.includes(`/@${creatorLower}/video/`);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -468,11 +616,32 @@ export async function runAffiliateProcurementForAccounts(userId: number): Promis
     connection.release();
 
     // ---------------------------------------------------------------------------
-    // Account rotation loop
+    // Account rotation loop — resume from last saved position
     // ---------------------------------------------------------------------------
-    let keywordIndex = 0;
 
-    for (const account of accounts) {
+    // Load persisted state so we pick up where we left off after a stop/restart.
+    const savedState = await loadAffiliateState(userId);
+    let keywordIndex = savedState.keywordIndex;
+
+    // Sort accounts deterministically so the index is stable across restarts.
+    accounts.sort((a: any, b: any) => a.id - b.id);
+
+    // Find the account AFTER the last one that ran (round-robin).
+    let startAccountIdx = 0;
+    if (savedState.lastAccountId !== null) {
+      const lastIdx = accounts.findIndex((a: any) => a.id === savedState.lastAccountId);
+      if (lastIdx !== -1) {
+        startAccountIdx = (lastIdx + 1) % accounts.length;
+      }
+    }
+
+    // Reorder so we begin at startAccountIdx (single pass, wrap around naturally).
+    const orderedAccounts = [
+      ...accounts.slice(startAccountIdx),
+      ...accounts.slice(0, startAccountIdx)
+    ];
+
+    for (const account of orderedAccounts) {
       if (!(await isAffiliateAutomationRunning(userId))) {
         console.log('[Affiliate Worker] Stopped by user');
         return;
@@ -589,8 +758,7 @@ export async function runAffiliateProcurementForAccounts(userId: number): Promis
           });
         }
 
-        const videoHrefs = await getSearchVideoUrls(page, keyword);
-        const videoResults = videoHrefs.map(href => ({ href }));
+        const videoResults = await getSearchVideoCandidates(page, keyword);
 
         console.log(
           `[Affiliate Worker] Found ${videoResults.length} videos for keyword "${keyword}"`
@@ -616,9 +784,114 @@ export async function runAffiliateProcurementForAccounts(userId: number): Promis
           if (!(await isAffiliateAutomationRunning(userId))) return;
           if (usersProcessed >= USERS_PER_SESSION) break;
 
-          const videoUrl = videoEl.href.startsWith('http')
-            ? videoEl.href
-            : `https://www.tiktok.com${videoEl.href}`;
+          const creatorUsername = videoEl.creatorUsername;
+          const profileUrl = videoEl.profileUrl;
+
+          // Skip creators we have already contacted (DM sent in a prior session).
+          const alreadyContactedPre = await hasContactedUser(userId, creatorUsername);
+          if (alreadyContactedPre) {
+            console.log(`[Affiliate Worker] @${creatorUsername} already contacted — skipping`);
+            continue;
+          }
+
+          // Step 1: navigate to creator profile first (required flow)
+          try {
+            await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          } catch {
+            console.log(`[Affiliate Worker] Profile navigation timeout for ${profileUrl}, skipping`);
+            continue;
+          }
+
+          // Guard against bad redirects (e.g. own profile or unexpected route)
+          const landedProfileUrl = page.url().toLowerCase();
+          if (!landedProfileUrl.includes(`/@${creatorUsername.toLowerCase()}`)) {
+            console.log(
+              `[Affiliate Worker] Profile mismatch. Expected @${creatorUsername}, landed on ${page.url()}. Skipping.`
+            );
+            continue;
+          }
+
+          // Step 1.5: DM creator immediately from their profile (once ever)
+          if (invitationText?.trim()) {
+            const alreadyContacted = await hasContactedUser(userId, creatorUsername);
+            if (!alreadyContacted) {
+              sendUserEvent(userId, {
+                type: 'info',
+                text: `📤 Affiliate: sending DM to @${creatorUsername}`
+              });
+
+              const dmResult = await tryToSendDM(page, creatorUsername, invitationText);
+              if (dmResult.success) {
+                await recordContact(userId, creatorUsername, 'dm', account.id, profileUrl);
+                await logActivity(
+                  userId,
+                  account.id,
+                  'affiliate_dm_sent',
+                  creatorUsername,
+                  profileUrl,
+                  invitationText,
+                  true
+                );
+                await markProspectDmSentByUsername(userId, creatorUsername);
+                sendUserEvent(userId, {
+                  type: 'success',
+                  text: `✅ Affiliate DM sent to @${creatorUsername}`
+                });
+              } else {
+                await logActivity(
+                  userId,
+                  account.id,
+                  'affiliate_dm_sent',
+                  creatorUsername,
+                  profileUrl,
+                  invitationText,
+                  false,
+                  dmResult.error
+                );
+                console.log(`[Affiliate Worker] DM failed for @${creatorUsername}: ${dmResult.error}`);
+              }
+
+              await new Promise(resolve => setTimeout(resolve, 1200));
+            }
+          }
+
+          // IMPORTANT: tryToSendDM navigates into TikTok messages thread.
+          // Return to the creator's profile before we scrape/click profile videos.
+          try {
+            await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          } catch {
+            console.log(`[Affiliate Worker] Failed to return to profile ${profileUrl} after DM, skipping`);
+            continue;
+          }
+
+          const profileUrlAfterDm = page.url().toLowerCase();
+          if (!profileUrlAfterDm.includes(`/@${creatorUsername.toLowerCase()}`)) {
+            console.log(
+              `[Affiliate Worker] Post-DM profile mismatch. Expected @${creatorUsername}, landed on ${page.url()}. Skipping.`
+            );
+            continue;
+          }
+
+          // Step 2: from profile, choose first non-interacted video
+          const profileVideoUrls = await getProfileVideoUrlsForCreator(page, creatorUsername);
+
+          if (profileVideoUrls.length === 0) {
+            console.log(`[Affiliate Worker] No creator-owned videos found on profile @${creatorUsername}, skipping`);
+            continue;
+          }
+
+          let videoUrl: string | null = null;
+          for (const candidateUrl of profileVideoUrls) {
+            if (!(await hasInteractedWithVideo(userId, candidateUrl))) {
+              videoUrl = candidateUrl;
+              break;
+            }
+          }
+
+          if (!videoUrl) {
+            console.log(`[Affiliate Worker] All profile videos already interacted for @${creatorUsername}, skipping`);
+            continue;
+          }
 
           // Skip if already interacted
           if (await hasInteractedWithVideo(userId, videoUrl)) {
@@ -654,11 +927,11 @@ export async function runAffiliateProcurementForAccounts(userId: number): Promis
 
           // Scrape content
           const content = await scrapeVideoContent(page, 10);
-          const creatorUsername = content.username;
+          const resolvedCreatorUsername = content.username || creatorUsername;
 
           sendUserEvent(userId, {
             type: 'info',
-            text: `💬 Affiliate: commenting on @${creatorUsername}'s video`
+            text: `💬 Affiliate: commenting on @${resolvedCreatorUsername}'s video`
           });
 
           // Generate AI comment
@@ -674,7 +947,7 @@ export async function runAffiliateProcurementForAccounts(userId: number): Promis
             console.log(`[Affiliate Worker] OpenAI error:`, aiErr);
             sendUserEvent(userId, {
               type: 'warning',
-              text: `⚠️ Affiliate: OpenAI failed for @${creatorUsername}'s video, skipping`
+              text: `⚠️ Affiliate: OpenAI failed for @${resolvedCreatorUsername}'s video, skipping`
             });
             continue;
           }
@@ -691,14 +964,14 @@ export async function runAffiliateProcurementForAccounts(userId: number): Promis
               userId,
               account.id,
               'affiliate_comment_posted',
-              creatorUsername,
+              resolvedCreatorUsername,
               videoUrl,
               generatedComment,
               true
             );
             sendUserEvent(userId, {
               type: 'success',
-              text: `✅ Affiliate comment posted on @${creatorUsername}'s video`
+              text: `✅ Affiliate comment posted on @${resolvedCreatorUsername}'s video`
             });
           } else {
             console.log(
@@ -708,7 +981,7 @@ export async function runAffiliateProcurementForAccounts(userId: number): Promis
               userId,
               account.id,
               'affiliate_comment_posted',
-              creatorUsername,
+              resolvedCreatorUsername,
               videoUrl,
               generatedComment,
               false,
@@ -717,17 +990,20 @@ export async function runAffiliateProcurementForAccounts(userId: number): Promis
           }
 
           // Record video as interacted
-          await recordInteractedVideo(userId, videoUrl, creatorUsername);
+          await recordInteractedVideo(userId, videoUrl, resolvedCreatorUsername);
 
           // Add creator as a prospect (snooze applied so DM goes out next session)
-          if (creatorUsername) {
-            const profileUrl = `https://www.tiktok.com/@${creatorUsername}`;
-            await upsertAffiliateProspect(userId, creatorUsername, profileUrl, account.id, snoozeDays);
+          if (resolvedCreatorUsername) {
+            const resolvedProfileUrl = `https://www.tiktok.com/@${resolvedCreatorUsername}`;
+            await upsertAffiliateProspect(userId, resolvedCreatorUsername, resolvedProfileUrl, account.id, snoozeDays);
           }
 
           usersProcessed++;
           await new Promise(resolve => setTimeout(resolve, 2000));
         }
+
+        // Persist state so next start resumes from the next account + next keyword.
+        await saveAffiliateState(userId, keywordIndex, account.id);
 
         sendUserEvent(userId, {
           type: 'success',
