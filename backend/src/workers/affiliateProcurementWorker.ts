@@ -802,13 +802,27 @@ export async function runAffiliateProcurementForAccounts(userId: number): Promis
             continue;
           }
 
-          // Guard against bad redirects (e.g. own profile or unexpected route)
+          // Check if TikTok redirected us (e.g., numeric user ID -> actual handle)
           const landedProfileUrl = page.url().toLowerCase();
           if (!landedProfileUrl.includes(`/@${creatorUsername.toLowerCase()}`)) {
-            console.log(
-              `[Affiliate Worker] Profile mismatch. Expected @${creatorUsername}, landed on ${page.url()}. Skipping.`
-            );
-            continue;
+            // Profile URL mismatch - TikTok may have redirected
+            // Try to extract the canonical username from the landed URL
+            const urlMatch = page.url().match(/\/@([^/?]+)/);
+            if (urlMatch && urlMatch[1]) {
+              const canonicalUsername = urlMatch[1];
+              console.log(
+                `[Affiliate Worker] Profile redirect detected: @${creatorUsername} → @${canonicalUsername}. Using canonical handle.`
+              );
+              // Update creatorUsername to the canonical handle
+              creatorUsername = canonicalUsername;
+              // Update profileUrl to match
+              profileUrl = `https://www.tiktok.com/@${canonicalUsername}`;
+            } else {
+              console.log(
+                `[Affiliate Worker] Profile mismatch. Expected @${creatorUsername}, landed on ${page.url()}. Skipping.`
+              );
+              continue;
+            }
           }
 
           // Step 1.5: DM creator immediately from their profile (once ever)
