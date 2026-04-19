@@ -9,6 +9,7 @@ import OpenAIKey from '../components/onboarding/OpenAIKey'
 import BrandVoice from '../components/onboarding/BrandVoice'
 import SnoozeSettings from '../components/onboarding/SnoozeSettings'
 import AffiliateInvitationText from '../components/onboarding/AffiliateInvitationText'
+import AffiliateDmPrompt from '../components/onboarding/AffiliateDmPrompt'
 
 export default function Onboarding() {
   const [step, setStep] = useState(1)
@@ -22,11 +23,12 @@ export default function Onboarding() {
     openaiKey: '',
     brandVoice: '',
     snoozeDays: 3,
+    affiliateDmPrompt: '',
     affiliateInvitationText: '',
   })
   const navigate = useNavigate()
 
-  const totalSteps = 9
+  const totalSteps = 10
 
   const updateData = (field: string, value: any) => {
     setData(prev => ({ ...prev, [field]: value }))
@@ -157,6 +159,14 @@ export default function Onboarding() {
             />
           )}
           {step === 9 && (
+            <AffiliateDmPrompt
+              affiliateDmPrompt={data.affiliateDmPrompt}
+              onUpdate={(v) => updateData('affiliateDmPrompt', v)}
+              onNext={handleNext}
+              onBack={handleBack}
+            />
+          )}
+          {step === 10 && (
             <AffiliateInvitationText
               affiliateInvitationText={data.affiliateInvitationText}
               onUpdate={(v) => updateData('affiliateInvitationText', v)}

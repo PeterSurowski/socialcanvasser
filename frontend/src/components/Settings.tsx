@@ -10,6 +10,8 @@ interface SettingsData {
   actions_per_session: number;
   brand_voice: string;
   snooze_days: number;
+  affiliate_dm_eds_threshold: number;
+  affiliate_dm_prompt: string;
   affiliate_invitation_text: string;
 }
 
@@ -24,6 +26,8 @@ export default function Settings() {
     actions_per_session: 20,
     brand_voice: '',
     snooze_days: 3,
+    affiliate_dm_eds_threshold: 4,
+    affiliate_dm_prompt: '',
     affiliate_invitation_text: '',
   })
   const [loading, setLoading] = useState(true)
@@ -54,6 +58,8 @@ export default function Settings() {
           actions_per_session: data.config.actions_per_session || 20,
           brand_voice: data.config.brand_voice || '',
           snooze_days: data.config.snooze_days ?? 3,
+          affiliate_dm_eds_threshold: data.config.affiliate_dm_eds_threshold ?? 4,
+          affiliate_dm_prompt: data.config.affiliate_dm_prompt || '',
           affiliate_invitation_text: data.config.affiliate_invitation_text || '',
         })
       }
@@ -88,6 +94,8 @@ export default function Settings() {
           actionsPerSession: settings.actions_per_session,
           brandVoice: settings.brand_voice,
           snoozeDays: settings.snooze_days,
+          affiliateDmEdsThreshold: settings.affiliate_dm_eds_threshold,
+          affiliateDmPrompt: settings.affiliate_dm_prompt,
           affiliateInvitationText: settings.affiliate_invitation_text,
         })
       })
@@ -266,6 +274,44 @@ export default function Settings() {
           />
           <p className="text-xs text-gray-500 mt-1">
             After commenting on a creator&apos;s video, wait this many days before DMing them
+          </p>
+        </div>
+
+        {/* Affiliate DM Writing Prompt */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Affiliate DM Writing Instructions
+            <span className="text-gray-500 font-normal ml-2">(tells OpenAI how to write each personalised DM)</span>
+          </label>
+          <textarea
+            value={settings.affiliate_dm_prompt}
+            onChange={(e) => handleChange('affiliate_dm_prompt', e.target.value)}
+            placeholder="Write a warm, personalised affiliate invitation DM. Keep it under 280 characters. Reference something specific from the creator's recent videos or bio…"
+            rows={5}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            Mention tone, what to reference from their content, character limits, your product, and commission details.
+          </p>
+        </div>
+
+        {/* EDS Threshold */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Engagement Depth Score (EDS) threshold to send DM
+          </label>
+          <input
+            type="number"
+            min="1"
+            max="20"
+            value={settings.affiliate_dm_eds_threshold}
+            onChange={(e) => handleChange('affiliate_dm_eds_threshold', parseInt(e.target.value) || 4)}
+            className="w-32 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            A creator must accumulate at least this many engagement points before the bot attempts to send an affiliate DM.
+            Each session visit = 1 pt, liked video = 1 pt, comment posted = 1 pt, follow = 1 pt.
+            Default is 4 (e.g. visit + like + comment + follow).
           </p>
         </div>
 

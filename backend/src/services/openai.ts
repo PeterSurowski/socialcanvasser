@@ -216,3 +216,64 @@ Write a single, natural comment in the brand voice described above. Return only 
     throw error;
   }
 }
+
+/**
+ * Generate a customized affiliate DM using prospect context and prior scraped content.
+ */
+export async function generateAffiliateProspectDM(
+  tiktokUsername: string,
+  userTitle: string,
+  bioText: string,
+  recentCaptions: string[],
+  recentComments: string[],
+  dmPrompt: string,
+  brandVoice: string,
+  openaiApiKey: string
+): Promise<string> {
+  const openai = new OpenAI({ apiKey: openaiApiKey });
+
+  const systemPrompt = `You write warm, human TikTok DMs that feel personal and natural.
+
+Brand Voice:
+${brandVoice}
+
+Rules:
+- Max 280 characters
+- Sound conversational and friendly, never salesy
+- Personalize based on the user's bio/title and recent content themes
+- Include one light question to invite a reply
+- No links, no pricing, no pressure
+- Return ONLY the DM text`;
+
+  const userPrompt = `Prospect username: @${tiktokUsername}
+Prospect title: ${userTitle || '(unknown)'}
+Prospect bio: ${bioText || '(none)'}
+
+Recently scraped video captions (up to 5):
+${recentCaptions.length ? recentCaptions.map((c, i) => `${i + 1}. ${c}`).join('\n') : '(none)'}
+
+Recently scraped video comments (up to 5):
+${recentComments.length ? recentComments.map((c, i) => `${i + 1}. ${c}`).join('\n') : '(none)'}
+
+DM prompt from onboarding:
+${dmPrompt}
+
+Write one personalized DM now.`;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      temperature: 0.8,
+      max_tokens: 140
+    });
+
+    return (completion.choices[0].message.content || '').trim().replace(/^"|"$/g, '');
+  } catch (error) {
+    console.error('[OpenAI] Error generating affiliate prospect DM:', error);
+    throw error;
+  }
+}
