@@ -1163,6 +1163,19 @@ export async function runAffiliateProcurementForAccounts(userId: number): Promis
       browserConnection = await connectBrowserForAccount(account as TikTokAccount);
       const page = browserConnection.page;
 
+      sendUserEvent(userId, {
+        type: 'info',
+        text: `🔔 Affiliate: checking notifications on @${account.account_identifier}`
+      });
+
+      try {
+        await page.goto('https://tiktok.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      } catch {
+        console.log(`[Affiliate Worker] Initial TikTok home navigation failed for @${account.account_identifier}`);
+      }
+
+      await processNotificationsAndScore(page, userId);
+
       while ((await isAffiliateAutomationRunning(userId)) && sessionCount < maxUsersPerSession) {
         let prospect = await findNextEligibleProspect(userId, account.id);
 
