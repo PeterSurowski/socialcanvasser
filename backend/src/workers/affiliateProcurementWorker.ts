@@ -1118,7 +1118,11 @@ async function processProspect(
   }
 
   const latestProspect = await getProspectById(prospect.id);
-  if (latestProspect && !asBool(latestProspect.is_following) && Math.random() < 0.05) {
+  const shouldFollow = latestProspect
+    ? !asBool(latestProspect.is_following) && (asBool(latestProspect.is_following_us) || Math.random() < 0.05)
+    : false;
+
+  if (shouldFollow) {
     const followed = await tryFollowCurrentProfile(page);
     if (followed) {
       await setProspectFollowing(prospect.id, true);
