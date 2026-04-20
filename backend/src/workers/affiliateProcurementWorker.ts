@@ -1062,16 +1062,13 @@ async function processProspect(
     return true;
   }
 
-  const liked = await likeVideo(page);
-  if (liked) {
-    await addProspectEds(prospect.id, 1);
-  }
-
+  let liked = false;
   let commentPosted = false;
   let caption = '';
   let comments: string[] = [];
 
-  if (Math.random() < 0.5) {
+  // Keep the probability check structure in place so randomized commenting can be restored later.
+  if (Math.random() < 1) {
     await openCommentsPanel(page);
     await delay(1200);
 
@@ -1113,6 +1110,11 @@ async function processProspect(
         }
       }
     }
+  }
+
+  liked = await likeVideo(page);
+  if (liked) {
+    await addProspectEds(prospect.id, 1);
   }
 
   const latestProspect = await getProspectById(prospect.id);
