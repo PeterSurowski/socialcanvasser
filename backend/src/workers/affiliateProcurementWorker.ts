@@ -808,36 +808,120 @@ async function watchRandomVideos(page: Page, videoUrls: string[]): Promise<void>
   }
 }
 
+async function scrapeInboxItems(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll('[data-e2e="inbox-list-item"]'));
+    const lines: string[] = [];
+
+    for (const row of rows) {
+      const content = row.querySelector('[data-e2e="inbox-content"]')?.textContent?.trim() || '';
+      const title = row.querySelector('[data-e2e="inbox-title"]')?.textContent?.trim() || '';
+
+      let username = '';
+      const anchors = Array.from(row.querySelectorAll('a[href*="/@"]')) as HTMLAnchorElement[];
+      for (const anchor of anchors) {
+        const href = anchor.getAttribute('href') || '';
+        const match = href.match(/\/@([^/?#]+)/);
+        if (match?.[1]) {
+          username = match[1];
+          break;
+        }
+      }
+
+      const combined = `${username} ${title} ${content}`.trim();
+      if (combined) lines.push(combined);
+    }
+
+    return lines;
+  });
+}
+
 async function processNotificationsAndScore(
   page: Page,
   userId: number
 ): Promise<void> {
   try {
-    const clicked = await page.evaluate(() => {
-      const btn = document.querySelector('[data-e2e="nav-activity"]') as HTMLElement | null;
-      if (!btn) return false;
-      btn.click();
-      return true;
-    });
+    const activityButtonSelector = [
+      '[data-e2e="nav-activity"]',
+      'button[aria-label="Activity"]',
+      '[role="listitem"][aria-label="Activity"]'
+    ].join(', ');
 
-    if (!clicked) return;
+    try {
+      await page.waitForSelector(activityButtonSelector, { timeout: 15000, visible: true });
+    } catch {
+      console.log('[Affiliate Worker] Notification check skipped: Activity button did not render in time');
+      return;
+    }
 
-    await delay(2500);
+    try {
+      await page.click(activityButtonSelector);
+      console.log('[Affiliate Worker] Opened Activity notifications');
+    } catch (error) {
+      console.log('[Affiliate Worker] Notification check skipped: failed to click Activity button', error);
+      return;
+    }
 
-    const activityText = await page.evaluate(() => {
-      const blocks = Array.from(document.querySelectorAll('[data-e2e*="notification"], [data-e2e*="activity"]'))
-        .map(el => (el.textContent || '').trim())
-        .filter(Boolean)
-        .slice(0, 30);
+    try {
+      await page.waitForFunction(
+        () => {
+          const inboxList = document.querySelector('[data-e2e="inbox-list"]');
+          const inboxListById = document.querySelector('#header-inbox-list');
+          const inboxItems = document.querySelectorAll('[data-e2e="inbox-list-item"]');
+          return Boolean(inboxList || inboxListById || inboxItems.length > 0);
+        },
+        { timeout: 15000 }
+      );
 
-      if (blocks.length) return blocks;
+      await page.waitForSelector('[data-e2e="inbox-list-item"], [data-e2e="inbox-list"], #header-inbox-list', {
+        timeout: 15000
+      });
+    } catch {
+      console.log('[Affiliate Worker] Notification check skipped: inbox list did not appear after clicking Activity');
+      return;
+    }
 
-      return (document.body.innerText || '')
-        .split('\n')
-        .map(line => line.trim())
-        .filter(Boolean)
-        .slice(0, 120);
-    });
+    await delay(1200);
+
+    const collected = new Set<string>();
+    let noGrowthRounds = 0;
+
+    for (let i = 0; i < 12 && collected.size < 30; i++) {
+      const batch = await scrapeInboxItems(page);
+      const before = collected.size;
+      for (const line of batch) {
+        collected.add(line);
+      }
+
+      if (collected.size === before) {
+        noGrowthRounds += 1;
+      } else {
+        noGrowthRounds = 0;
+      }
+
+      if (collected.size >= 30 || noGrowthRounds >= 3) {
+        break;
+      }
+
+      await page.mouse.move(150, 300);
+      await page.mouse.wheel({ deltaY: 650 });
+
+      await page.evaluate(() => {
+        const panel = document.querySelector('[data-e2e="inbox-list"]') as HTMLElement | null;
+        if (panel) {
+          panel.scrollBy({ top: 650, left: 0, behavior: 'auto' });
+        }
+      });
+
+      await delay(700);
+    }
+
+    const activityText = Array.from(collected).slice(0, 30);
+    console.log(`[Affiliate Worker] Scraped ${activityText.length} inbox notifications for scoring`);
+
+    if (!activityText.length) {
+      return;
+    }
 
     const prospects = await getProspectsOrdered(userId);
     for (const prospect of prospects) {

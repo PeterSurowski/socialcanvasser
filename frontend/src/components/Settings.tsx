@@ -303,7 +303,6 @@ export default function Settings() {
           <input
             type="number"
             min="1"
-            max="20"
             value={settings.affiliate_dm_eds_threshold}
             onChange={(e) => handleChange('affiliate_dm_eds_threshold', parseInt(e.target.value) || 4)}
             className="w-32 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"

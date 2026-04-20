@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import DashboardControls from '../components/DashboardControls'
 import SidebarFeed from '../components/SidebarFeed'
 import Settings from '../components/Settings'
 import StatsPanel from '../components/StatsPanel'
+import AffiliateStatsPanel from '../components/AffiliateStatsPanel'
 
 interface Account {
   id: number;
@@ -206,7 +207,7 @@ export default function Dashboard() {
 
         {/* Affiliate Procurement Tab */}
         {activeTab === 'affiliate' && (
-          <div className="bg-white rounded-lg shadow-sm p-8 max-w-2xl">
+          <div className="bg-white rounded-lg shadow-sm p-8">
             <div className="flex items-center gap-3 mb-4">
               <span className="text-3xl">🤝</span>
               <div>
@@ -259,6 +260,10 @@ export default function Dashboard() {
               </button>{' '}
               tab.
             </p>
+
+            <div className="mt-8 pt-6 border-t border-gray-200">
+              <AffiliateStatsPanel accounts={accounts} onRefreshAccounts={fetchAccounts} />
+            </div>
           </div>
         )}
 

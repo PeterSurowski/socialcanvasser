@@ -120,6 +120,111 @@ router.get('/account-stats/:accountId', authenticateToken, async (req: AuthReque
   }
 });
 
+// Get affiliate account-specific stats for a date range
+router.get('/affiliate-account-stats/:accountId', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const accountId = parseInt(req.params.accountId);
+    const startDate = req.query.startDate as string || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const endDate = req.query.endDate as string || new Date().toISOString().split('T')[0];
+
+    const [accountCheck]: any = await db.query(
+      'SELECT id FROM tiktok_accounts WHERE id = ? AND user_id = ?',
+      [accountId, userId]
+    );
+
+    if (!accountCheck || accountCheck.length === 0) {
+      return res.status(403).json({ message: 'Account not found' });
+    }
+
+    const [pipelineRows]: any = await db.query(
+      `SELECT COUNT(*) AS count
+       FROM affiliate_prospects
+       WHERE user_id = ?
+         AND incogniton_account_id = ?
+         AND last_interaction_at IS NOT NULL
+         AND DATE(last_interaction_at) >= ?
+         AND DATE(last_interaction_at) <= ?`,
+      [userId, accountId, startDate, endDate]
+    );
+
+    const [videoRows]: any = await db.query(
+      `SELECT
+         SUM(CASE WHEN iv.liked = 1 THEN 1 ELSE 0 END) AS videos_liked,
+         SUM(CASE WHEN iv.comment_posted = 1 THEN 1 ELSE 0 END) AS comments_left
+       FROM affiliate_interacted_videos iv
+       JOIN affiliate_prospects ap
+         ON ap.user_id = iv.user_id
+        AND ap.tiktok_username = iv.tiktok_username
+       WHERE iv.user_id = ?
+         AND ap.incogniton_account_id = ?
+         AND DATE(iv.interacted_at) >= ?
+         AND DATE(iv.interacted_at) <= ?`,
+      [userId, accountId, startDate, endDate]
+    );
+
+    const [followedRows]: any = await db.query(
+      `SELECT COUNT(*) AS count
+       FROM affiliate_prospects
+       WHERE user_id = ?
+         AND incogniton_account_id = ?
+         AND is_following = 1
+         AND DATE(updated_at) >= ?
+         AND DATE(updated_at) <= ?`,
+      [userId, accountId, startDate, endDate]
+    );
+
+    const [followedUsRows]: any = await db.query(
+      `SELECT COUNT(*) AS count
+       FROM affiliate_prospects
+       WHERE user_id = ?
+         AND incogniton_account_id = ?
+         AND is_following_us = 1
+         AND DATE(updated_at) >= ?
+         AND DATE(updated_at) <= ?`,
+      [userId, accountId, startDate, endDate]
+    );
+
+    const [commentsLikedRows]: any = await db.query(
+      `SELECT COUNT(*) AS count
+       FROM activity_logs
+       WHERE user_id = ?
+         AND tiktok_account_id = ?
+         AND action_type = 'comment_liked'
+         AND DATE(created_at) >= ?
+         AND DATE(created_at) <= ?`,
+      [userId, accountId, startDate, endDate]
+    );
+
+    const [commentRepliesRows]: any = await db.query(
+      `SELECT COUNT(*) AS count
+       FROM activity_logs
+       WHERE user_id = ?
+         AND tiktok_account_id = ?
+         AND action_type = 'comment_reply_received'
+         AND DATE(created_at) >= ?
+         AND DATE(created_at) <= ?`,
+      [userId, accountId, startDate, endDate]
+    );
+
+    res.json({
+      accountId,
+      startDate,
+      endDate,
+      prospects_in_pipeline: Number((pipelineRows[0] as any)?.count || 0),
+      videos_liked: Number((videoRows[0] as any)?.videos_liked || 0),
+      comments_left: Number((videoRows[0] as any)?.comments_left || 0),
+      users_followed: Number((followedRows[0] as any)?.count || 0),
+      prospects_followed_us: Number((followedUsRows[0] as any)?.count || 0),
+      comments_liked: Number((commentsLikedRows[0] as any)?.count || 0),
+      replies_to_comments: Number((commentRepliesRows[0] as any)?.count || 0)
+    });
+  } catch (error) {
+    console.error('Affiliate account stats error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // Toggle pause state for a TikTok account
 router.post('/accounts/:accountId/toggle-pause', authenticateToken, async (req: AuthRequest, res) => {
   try {
