@@ -17,6 +17,14 @@ interface AffiliateAccountStats {
   is_paused?: boolean;
 }
 
+interface KeepInTouchUser {
+  id: number;
+  tiktok_username: string;
+  profile_url: string;
+  incogniton_account_id: number | null;
+  snoozed_until: string | null;
+}
+
 export default function AffiliateStatsPanel({
   accounts,
   onRefreshAccounts
@@ -33,10 +41,20 @@ export default function AffiliateStatsPanel({
   const [endDate, setEndDate] = useState(() => new Date().toISOString().split('T')[0])
   const [stats, setStats] = useState<Record<number | string, AffiliateAccountStats>>({})
   const [loading, setLoading] = useState(false)
+  const [keepInTouchUsers, setKeepInTouchUsers] = useState<KeepInTouchUser[]>([])
+  const [keepInTouchLoading, setKeepInTouchLoading] = useState(false)
+  const [keepInTouchUsername, setKeepInTouchUsername] = useState('')
+  const [keepInTouchSaving, setKeepInTouchSaving] = useState(false)
+  const [keepInTouchMessage, setKeepInTouchMessage] = useState<string | null>(null)
+  const [removingIds, setRemovingIds] = useState<number[]>([])
 
   useEffect(() => {
     fetchStats()
   }, [activeTab, startDate, endDate, accounts])
+
+  useEffect(() => {
+    fetchKeepInTouchUsers()
+  }, [activeTab, accounts])
 
   const fetchStats = async () => {
     setLoading(true)
@@ -103,6 +121,92 @@ export default function AffiliateStatsPanel({
       console.error('Error fetching affiliate stats:', error)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const fetchKeepInTouchUsers = async () => {
+    setKeepInTouchLoading(true)
+    const token = localStorage.getItem('token')
+
+    try {
+      const accountIdParam = activeTab === 'overall' ? 'overall' : String(activeTab)
+      const res = await fetch(`/api/dashboard/affiliate/keep-in-touch?accountId=${accountIdParam}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      })
+
+      if (res.ok) {
+        const data = await res.json()
+        setKeepInTouchUsers(data.users || [])
+      } else {
+        setKeepInTouchUsers([])
+      }
+    } catch (error) {
+      console.error('Error fetching Keep in Touch users:', error)
+      setKeepInTouchUsers([])
+    } finally {
+      setKeepInTouchLoading(false)
+    }
+  }
+
+  const handleAddKeepInTouch = async () => {
+    const username = keepInTouchUsername.trim().replace(/^@/, '')
+    if (!username) return
+
+    setKeepInTouchSaving(true)
+    setKeepInTouchMessage(null)
+
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch('/api/dashboard/affiliate/keep-in-touch', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ username })
+      })
+
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setKeepInTouchMessage(data?.message || 'Failed to add Keep in Touch user')
+        return
+      }
+
+      setKeepInTouchUsername('')
+      setKeepInTouchMessage(`Added @${data?.username || username} to Keep in Touch`)
+      await fetchKeepInTouchUsers()
+    } catch (error) {
+      console.error('Error adding Keep in Touch user:', error)
+      setKeepInTouchMessage('Failed to add Keep in Touch user')
+    } finally {
+      setKeepInTouchSaving(false)
+    }
+  }
+
+  const handleRemoveKeepInTouch = async (prospectId: number) => {
+    setRemovingIds((prev) => [...prev, prospectId])
+    setKeepInTouchMessage(null)
+
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch(`/api/dashboard/affiliate/keep-in-touch/${prospectId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      })
+
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setKeepInTouchMessage(data?.message || 'Failed to remove Keep in Touch user')
+        return
+      }
+
+      await fetchKeepInTouchUsers()
+      setKeepInTouchMessage('Removed user from Keep in Touch')
+    } catch (error) {
+      console.error('Error removing Keep in Touch user:', error)
+      setKeepInTouchMessage('Failed to remove Keep in Touch user')
+    } finally {
+      setRemovingIds((prev) => prev.filter((id) => id !== prospectId))
     }
   }
 
@@ -231,6 +335,37 @@ export default function AffiliateStatsPanel({
         <div className="text-center py-8 text-gray-500">Loading affiliate stats...</div>
       ) : (
         <div className="space-y-3">
+          {activeTab === 'overall' && (
+            <div className="bg-indigo-50 rounded-lg p-4 border border-indigo-200 space-y-3">
+              <div className="text-sm font-semibold text-indigo-900">Keep in Touch</div>
+              <div className="text-xs text-indigo-700">
+                Add a username to Keep in Touch. These prospects stay in normal engagement but never receive affiliate DMs.
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="px-3 py-2 rounded-lg bg-white border border-gray-300 text-sm text-gray-700 whitespace-nowrap">
+                  https://tiktok.com/@
+                </span>
+                <input
+                  type="text"
+                  value={keepInTouchUsername}
+                  onChange={(e) => setKeepInTouchUsername(e.target.value)}
+                  placeholder="username"
+                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg"
+                />
+                <button
+                  onClick={handleAddKeepInTouch}
+                  disabled={keepInTouchSaving || !keepInTouchUsername.trim()}
+                  className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-medium disabled:opacity-50"
+                >
+                  {keepInTouchSaving ? 'Adding...' : 'Add'}
+                </button>
+              </div>
+              {keepInTouchMessage && (
+                <div className="text-xs text-indigo-800">{keepInTouchMessage}</div>
+              )}
+            </div>
+          )}
+
           {statRows.map((stat) => (
             <div key={stat.label} className="bg-purple-50 rounded-lg p-4 border border-purple-200 flex items-center justify-between">
               <div className="text-sm font-medium text-purple-700">{stat.label}</div>
@@ -255,6 +390,37 @@ export default function AffiliateStatsPanel({
               </button>
             </div>
           )}
+
+          <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+            <div className="text-sm font-semibold text-gray-800 mb-2">
+              Keep in Touch users {activeTab === 'overall' ? '(all accounts)' : '(this account)'}
+            </div>
+            {keepInTouchLoading ? (
+              <div className="text-sm text-gray-500">Loading Keep in Touch users...</div>
+            ) : keepInTouchUsers.length === 0 ? (
+              <div className="text-sm text-gray-500">No users in Keep in Touch for this view.</div>
+            ) : (
+              <div className="space-y-2">
+                {keepInTouchUsers.map((user) => (
+                  <div key={user.id} className="flex items-center justify-between bg-white border border-gray-200 rounded-lg px-3 py-2">
+                    <div>
+                      <div className="text-sm font-medium text-gray-800">@{user.tiktok_username}</div>
+                      <div className="text-xs text-gray-500">
+                        Snoozed until {user.snoozed_until ? new Date(user.snoozed_until).toLocaleDateString() : 'not set'}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => handleRemoveKeepInTouch(user.id)}
+                      disabled={removingIds.includes(user.id)}
+                      className="px-3 py-1 text-xs font-medium text-red-700 bg-red-50 border border-red-200 rounded hover:bg-red-100 disabled:opacity-50"
+                    >
+                      {removingIds.includes(user.id) ? 'Removing...' : 'Remove'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

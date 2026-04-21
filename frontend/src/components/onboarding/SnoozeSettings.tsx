@@ -1,11 +1,13 @@
 interface SnoozeSettingsProps {
   snoozeDays: number;
+  keepInTouchSnoozeDays: number;
   onUpdate: (value: number) => void;
+  onUpdateKeepInTouch: (value: number) => void;
   onNext: () => void;
   onBack: () => void;
 }
 
-export default function SnoozeSettings({ snoozeDays, onUpdate, onNext, onBack }: SnoozeSettingsProps) {
+export default function SnoozeSettings({ snoozeDays, keepInTouchSnoozeDays, onUpdate, onUpdateKeepInTouch, onNext, onBack }: SnoozeSettingsProps) {
   return (
     <div>
       <h2 className="text-2xl font-bold text-gray-800 mb-2">Prospect Snooze Period</h2>
@@ -29,6 +31,23 @@ export default function SnoozeSettings({ snoozeDays, onUpdate, onNext, onBack }:
         />
         <p className="text-sm text-gray-500 mt-2">
           Recommended: 3–7 days
+        </p>
+      </div>
+
+      <div className="mb-6">
+        <label className="block text-sm font-medium text-gray-700 mb-2">
+          Keep in Touch snooze days
+        </label>
+        <input
+          type="number"
+          min={1}
+          max={365}
+          value={keepInTouchSnoozeDays}
+          onChange={(e) => onUpdateKeepInTouch(Math.max(1, Math.min(365, parseInt(e.target.value) || 14)))}
+          className="w-40 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-center text-xl font-semibold"
+        />
+        <p className="text-sm text-gray-500 mt-2">
+          Recommended: 14–45 days for prospects who said &ldquo;not now&rdquo;
         </p>
       </div>
 

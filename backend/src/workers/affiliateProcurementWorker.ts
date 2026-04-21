@@ -27,6 +27,7 @@ interface AffiliateConfig {
   brandVoice: string;
   invitationText: string;
   snoozeDays: number;
+  keepInTouchSnoozeDays: number;
   openaiApiKey: string;
   dmEdsThreshold: number;
 }
@@ -44,6 +45,7 @@ interface ProspectRow {
   user_title: string | null;
   is_following: number | boolean;
   is_following_us: number | boolean;
+  is_keep_in_touch: number | boolean;
   snoozed_until: string | null;
   dm_sent: number | boolean;
 }
@@ -144,7 +146,7 @@ async function getAffiliateConfig(userId: number): Promise<AffiliateConfig | nul
   const connection = await db.getConnection();
   try {
     const [configRows] = await connection.query(
-      `SELECT keywords, brand_voice, affiliate_invitation_text, snooze_days, openai_api_key, affiliate_dm_eds_threshold
+      `SELECT keywords, brand_voice, affiliate_invitation_text, snooze_days, keep_in_touch_snooze_days, openai_api_key, affiliate_dm_eds_threshold
        FROM user_config WHERE user_id = ? LIMIT 1`,
       [userId]
     );
@@ -162,6 +164,7 @@ async function getAffiliateConfig(userId: number): Promise<AffiliateConfig | nul
       brandVoice: row.brand_voice || '',
       invitationText: row.affiliate_invitation_text || '',
       snoozeDays: row.snooze_days ?? 3,
+      keepInTouchSnoozeDays: row.keep_in_touch_snooze_days ?? 14,
       openaiApiKey: row.openai_api_key || '',
       dmEdsThreshold: row.affiliate_dm_eds_threshold ?? 4
     };
@@ -367,6 +370,13 @@ async function snoozeProspect(prospectId: number, snoozeDays: number): Promise<v
   } finally {
     connection.release();
   }
+}
+
+function getSnoozeDaysForProspect(prospect: ProspectRow | null, config: AffiliateConfig): number {
+  if (prospect && asBool(prospect.is_keep_in_touch)) {
+    return config.keepInTouchSnoozeDays;
+  }
+  return config.snoozeDays;
 }
 
 async function hasInteractedWithVideo(userId: number, videoUrl: string): Promise<boolean> {
@@ -754,6 +764,62 @@ async function getProfileVideoUrlsForCreator(page: Page, creatorUsername: string
   return urls.filter(url => url.toLowerCase().includes(`/@${target}/video/`));
 }
 
+async function openProfileVideoByClick(page: Page, targetVideoUrl: string): Promise<boolean> {
+  const normalizedTarget = normalizeTikTokUrl(targetVideoUrl).toLowerCase();
+  const targetVideoId = normalizedTarget.match(/\/video\/(\d+)/)?.[1] || '';
+
+  for (let scrollAttempt = 0; scrollAttempt < 8; scrollAttempt++) {
+    const links = await page.$$('a[href*="/video/"]');
+
+    for (const link of links) {
+      const href = await link.evaluate(el => {
+        const anchor = el as HTMLAnchorElement;
+        return anchor.href || anchor.getAttribute('href') || '';
+      });
+
+      const normalizedHref = normalizeTikTokUrl(href).toLowerCase();
+      const hrefVideoId = normalizedHref.match(/\/video\/(\d+)/)?.[1] || '';
+
+      const isMatch =
+        normalizedHref === normalizedTarget ||
+        (Boolean(targetVideoId) && hrefVideoId === targetVideoId);
+
+      if (!isMatch) {
+        continue;
+      }
+
+      await link.evaluate(el => {
+        (el as HTMLElement).scrollIntoView({ block: 'center', inline: 'center', behavior: 'auto' });
+      });
+
+      await delay(randomInt(180, 420));
+
+      const box = await link.boundingBox();
+      if (!box || box.width < 2 || box.height < 2) {
+        continue;
+      }
+
+      const clickX = box.x + Math.max(2, Math.min(box.width - 2, box.width / 2 + randomInt(-4, 4)));
+      const clickY = box.y + Math.max(2, Math.min(box.height - 2, box.height / 2 + randomInt(-4, 4)));
+
+      await page.mouse.move(clickX, clickY, { steps: randomInt(6, 14) });
+      await delay(randomInt(60, 200));
+      await page.mouse.click(clickX, clickY, { delay: randomInt(20, 90) });
+
+      try {
+        await page.waitForSelector('[data-e2e="browse-video"], [data-e2e="browse-username"], video', { timeout: 12000 });
+        return true;
+      } catch {
+      }
+    }
+
+    await page.evaluate(() => window.scrollBy(0, window.innerHeight * 0.9));
+    await delay(900);
+  }
+
+  return false;
+}
+
 async function seedProspectsFromKeyword(
   page: Page,
   userId: number,
@@ -790,21 +856,31 @@ async function seedProspectsFromKeyword(
   return seeded;
 }
 
-async function watchRandomVideos(page: Page, videoUrls: string[]): Promise<void> {
+async function watchRandomVideos(page: Page, videoUrls: string[], profileUrl: string): Promise<void> {
   if (!videoUrls.length) return;
 
   const count = Math.min(videoUrls.length, randomInt(1, 3));
   for (let i = 0; i < count; i++) {
     const url = videoUrls[i];
-    try {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
-      await page.waitForSelector('[data-e2e="browse-video"], [data-e2e="browse-username"], video', { timeout: 12000 });
-    } catch {
+    const opened = await openProfileVideoByClick(page, url);
+    if (!opened) {
       continue;
     }
 
     const watchSeconds = randomInt(WATCH_MIN_SECONDS, WATCH_MAX_SECONDS);
     await delay(watchSeconds * 1000);
+
+    try {
+      await page.goBack({ waitUntil: 'domcontentloaded', timeout: 25000 });
+    } catch {
+      try {
+        await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+      } catch {
+        return;
+      }
+    }
+
+    await delay(900);
   }
 }
 
@@ -1024,11 +1100,11 @@ async function processProspect(
 
   const profileVideoUrls = await getProfileVideoUrlsForCreator(page, canonicalUsername);
   if (!profileVideoUrls.length) {
-    await snoozeProspect(prospect.id, config.snoozeDays);
+    await snoozeProspect(prospect.id, getSnoozeDaysForProspect(prospect, config));
     return true;
   }
 
-  await watchRandomVideos(page, profileVideoUrls);
+  await watchRandomVideos(page, profileVideoUrls, profileUrl);
 
   try {
     await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
@@ -1038,7 +1114,7 @@ async function processProspect(
 
   const refreshedVideoUrls = await getProfileVideoUrlsForCreator(page, canonicalUsername);
   if (!refreshedVideoUrls.length) {
-    await snoozeProspect(prospect.id, config.snoozeDays);
+    await snoozeProspect(prospect.id, getSnoozeDaysForProspect(prospect, config));
     return true;
   }
 
@@ -1051,14 +1127,12 @@ async function processProspect(
   }
 
   if (!targetVideoUrl) {
-    await snoozeProspect(prospect.id, config.snoozeDays);
+    await snoozeProspect(prospect.id, getSnoozeDaysForProspect(prospect, config));
     return true;
   }
 
-  try {
-    await page.goto(targetVideoUrl, { waitUntil: 'networkidle2', timeout: 22000 });
-    await page.waitForSelector('[data-e2e="browse-video"], [data-e2e="browse-username"], video', { timeout: 12000 });
-  } catch {
+  const openedTargetVideo = await openProfileVideoByClick(page, targetVideoUrl);
+  if (!openedTargetVideo) {
     return true;
   }
 
@@ -1140,13 +1214,14 @@ async function processProspect(
     commentPosted
   );
 
-  await snoozeProspect(prospect.id, config.snoozeDays);
+  await snoozeProspect(prospect.id, getSnoozeDaysForProspect(prospect, config));
 
   const refreshedProspect = await getProspectById(prospect.id);
   const dmSent = refreshedProspect ? asBool(refreshedProspect.dm_sent) : false;
   const currentEds = refreshedProspect?.engagement_depth_score ?? 0;
+  const keepInTouch = refreshedProspect ? asBool(refreshedProspect.is_keep_in_touch) : false;
 
-  if (!dmSent && currentEds >= config.dmEdsThreshold && config.invitationText?.trim() && Math.random() < 0.5) {
+  if (!keepInTouch && !dmSent && currentEds >= config.dmEdsThreshold && config.invitationText?.trim() && Math.random() < 0.5) {
     const alreadyContacted = await hasContactedUser(userId, canonicalUsername);
     if (!alreadyContacted) {
       const context = await getRecentContextForProspect(userId, canonicalUsername);

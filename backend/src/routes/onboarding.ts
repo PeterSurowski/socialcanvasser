@@ -8,7 +8,7 @@ const router = Router();
 router.post('/complete', authenticateToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.userId;
-    const { tiktokAccounts, keywords, aiPrompt, creatorMessage, exampleDM, exampleComment, openaiKey, brandVoice, snoozeDays, affiliateDmPrompt, affiliateInvitationText, affiliateDmEdsThreshold } = req.body;
+    const { tiktokAccounts, keywords, aiPrompt, creatorMessage, exampleDM, exampleComment, openaiKey, brandVoice, snoozeDays, keepInTouchSnoozeDays, affiliateDmPrompt, affiliateInvitationText, affiliateDmEdsThreshold } = req.body;
 
     // Validation
     if (!keywords || !aiPrompt || !exampleDM || !exampleComment || !openaiKey) {
@@ -47,8 +47,8 @@ router.post('/complete', authenticateToken, async (req: AuthRequest, res) => {
       // Save configuration
       await connection.query(
         `INSERT INTO user_config 
-         (user_id, keywords, ai_prompt, creator_message, example_dm, example_comment, openai_api_key, is_onboarding_complete, brand_voice, snooze_days, affiliate_dm_prompt, affiliate_invitation_text, affiliate_dm_eds_threshold) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         (user_id, keywords, ai_prompt, creator_message, example_dm, example_comment, openai_api_key, is_onboarding_complete, brand_voice, snooze_days, keep_in_touch_snooze_days, affiliate_dm_prompt, affiliate_invitation_text, affiliate_dm_eds_threshold) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE 
          keywords = VALUES(keywords),
          ai_prompt = VALUES(ai_prompt),
@@ -59,10 +59,11 @@ router.post('/complete', authenticateToken, async (req: AuthRequest, res) => {
          is_onboarding_complete = VALUES(is_onboarding_complete),
          brand_voice = VALUES(brand_voice),
          snooze_days = VALUES(snooze_days),
+         keep_in_touch_snooze_days = VALUES(keep_in_touch_snooze_days),
          affiliate_dm_prompt = VALUES(affiliate_dm_prompt),
          affiliate_invitation_text = VALUES(affiliate_invitation_text),
          affiliate_dm_eds_threshold = VALUES(affiliate_dm_eds_threshold)`,
-        [userId, keywords, aiPrompt, creatorMessage || null, exampleDM, exampleComment, openaiKey, true, brandVoice || null, snoozeDays || 3, affiliateDmPrompt || null, affiliateInvitationText || null, affiliateDmEdsThreshold || 4]
+        [userId, keywords, aiPrompt, creatorMessage || null, exampleDM, exampleComment, openaiKey, true, brandVoice || null, snoozeDays || 3, keepInTouchSnoozeDays || 14, affiliateDmPrompt || null, affiliateInvitationText || null, affiliateDmEdsThreshold || 4]
       );
 
       // Initialize automation state

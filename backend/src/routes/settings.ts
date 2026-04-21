@@ -10,7 +10,7 @@ router.get('/', authenticateToken, async (req: AuthRequest, res) => {
     const userId = req.userId;
 
     const [config]: any = await db.query(
-      'SELECT keywords, ai_prompt, creator_message, example_dm, example_comment, openai_api_key, brand_voice, snooze_days, affiliate_dm_prompt, affiliate_invitation_text, affiliate_dm_eds_threshold FROM user_config WHERE user_id = ?',
+      'SELECT keywords, ai_prompt, creator_message, example_dm, example_comment, openai_api_key, brand_voice, snooze_days, keep_in_touch_snooze_days, affiliate_dm_prompt, affiliate_invitation_text, affiliate_dm_eds_threshold FROM user_config WHERE user_id = ?',
       [userId]
     );
 
@@ -48,14 +48,14 @@ router.get('/', authenticateToken, async (req: AuthRequest, res) => {
 router.put('/', authenticateToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.userId;
-    const { keywords, aiPrompt, creatorMessage, exampleDM, exampleComment, openaiApiKey, actionsPerSession, brandVoice, snoozeDays, affiliateDmPrompt, affiliateInvitationText, affiliateDmEdsThreshold } = req.body;
+    const { keywords, aiPrompt, creatorMessage, exampleDM, exampleComment, openaiApiKey, actionsPerSession, brandVoice, snoozeDays, keepInTouchSnoozeDays, affiliateDmPrompt, affiliateInvitationText, affiliateDmEdsThreshold } = req.body;
 
     await db.query(
       `UPDATE user_config 
        SET keywords = ?, ai_prompt = ?, creator_message = ?, example_dm = ?, example_comment = ?, openai_api_key = ?,
-           brand_voice = ?, snooze_days = ?, affiliate_dm_prompt = ?, affiliate_invitation_text = ?, affiliate_dm_eds_threshold = ?
+           brand_voice = ?, snooze_days = ?, keep_in_touch_snooze_days = ?, affiliate_dm_prompt = ?, affiliate_invitation_text = ?, affiliate_dm_eds_threshold = ?
        WHERE user_id = ?`,
-      [keywords, aiPrompt, creatorMessage, exampleDM, exampleComment, openaiApiKey, brandVoice ?? null, snoozeDays ?? 3, affiliateDmPrompt ?? null, affiliateInvitationText ?? null, affiliateDmEdsThreshold ?? 4, userId]
+      [keywords, aiPrompt, creatorMessage, exampleDM, exampleComment, openaiApiKey, brandVoice ?? null, snoozeDays ?? 3, keepInTouchSnoozeDays ?? 14, affiliateDmPrompt ?? null, affiliateInvitationText ?? null, affiliateDmEdsThreshold ?? 4, userId]
     );
 
     // Update actions_per_session for all user's TikTok accounts

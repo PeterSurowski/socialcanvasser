@@ -23,6 +23,7 @@ export default function Onboarding() {
     openaiKey: '',
     brandVoice: '',
     snoozeDays: 3,
+    keepInTouchSnoozeDays: 14,
     affiliateDmPrompt: '',
     affiliateInvitationText: '',
   })
@@ -153,7 +154,9 @@ export default function Onboarding() {
           {step === 8 && (
             <SnoozeSettings
               snoozeDays={data.snoozeDays}
+              keepInTouchSnoozeDays={data.keepInTouchSnoozeDays}
               onUpdate={(v) => updateData('snoozeDays', v)}
+              onUpdateKeepInTouch={(v) => updateData('keepInTouchSnoozeDays', v)}
               onNext={handleNext}
               onBack={handleBack}
             />

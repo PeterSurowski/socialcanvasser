@@ -10,6 +10,7 @@ interface SettingsData {
   actions_per_session: number;
   brand_voice: string;
   snooze_days: number;
+  keep_in_touch_snooze_days: number;
   affiliate_dm_eds_threshold: number;
   affiliate_dm_prompt: string;
   affiliate_invitation_text: string;
@@ -26,6 +27,7 @@ export default function Settings() {
     actions_per_session: 20,
     brand_voice: '',
     snooze_days: 3,
+    keep_in_touch_snooze_days: 14,
     affiliate_dm_eds_threshold: 4,
     affiliate_dm_prompt: '',
     affiliate_invitation_text: '',
@@ -58,6 +60,7 @@ export default function Settings() {
           actions_per_session: data.config.actions_per_session || 20,
           brand_voice: data.config.brand_voice || '',
           snooze_days: data.config.snooze_days ?? 3,
+          keep_in_touch_snooze_days: data.config.keep_in_touch_snooze_days ?? 14,
           affiliate_dm_eds_threshold: data.config.affiliate_dm_eds_threshold ?? 4,
           affiliate_dm_prompt: data.config.affiliate_dm_prompt || '',
           affiliate_invitation_text: data.config.affiliate_invitation_text || '',
@@ -94,6 +97,7 @@ export default function Settings() {
           actionsPerSession: settings.actions_per_session,
           brandVoice: settings.brand_voice,
           snoozeDays: settings.snooze_days,
+          keepInTouchSnoozeDays: settings.keep_in_touch_snooze_days,
           affiliateDmEdsThreshold: settings.affiliate_dm_eds_threshold,
           affiliateDmPrompt: settings.affiliate_dm_prompt,
           affiliateInvitationText: settings.affiliate_invitation_text,
@@ -274,6 +278,23 @@ export default function Settings() {
           />
           <p className="text-xs text-gray-500 mt-1">
             After commenting on a creator&apos;s video, wait this many days before DMing them
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Keep in Touch snooze days
+          </label>
+          <input
+            type="number"
+            min="1"
+            max="365"
+            value={settings.keep_in_touch_snooze_days}
+            onChange={(e) => handleChange('keep_in_touch_snooze_days', parseInt(e.target.value) || 14)}
+            className="w-32 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            Prospects marked as Keep in Touch will be revisited on this longer cadence and will never receive affiliate DMs.
           </p>
         </div>
 
