@@ -192,6 +192,7 @@ CREATE TABLE IF NOT EXISTS affiliate_prospects (
     is_following BOOLEAN DEFAULT FALSE,
     is_following_us BOOLEAN DEFAULT FALSE,
     is_keep_in_touch BOOLEAN DEFAULT FALSE,
+    is_ignore_list BOOLEAN DEFAULT FALSE,
     snoozed_until TIMESTAMP NULL,
     dm_sent BOOLEAN DEFAULT FALSE,
     dm_sent_at TIMESTAMP NULL,
@@ -203,7 +204,8 @@ CREATE TABLE IF NOT EXISTS affiliate_prospects (
     UNIQUE KEY unique_prospect (user_id, tiktok_username),
     INDEX idx_ap_user_id (user_id),
     INDEX idx_ap_snoozed_until (snoozed_until),
-    INDEX idx_ap_dm_sent (dm_sent)
+    INDEX idx_ap_dm_sent (dm_sent),
+    INDEX idx_ap_ignore_list (user_id, is_ignore_list)
 );
 
 CREATE TABLE IF NOT EXISTS affiliate_interacted_videos (

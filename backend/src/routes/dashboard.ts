@@ -355,6 +355,99 @@ router.delete('/affiliate/keep-in-touch/:prospectId', authenticateToken, async (
   }
 });
 
+router.get('/affiliate/ignore-list', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+
+    const [rows]: any = await db.query(
+      `SELECT id, tiktok_username, profile_url, updated_at
+       FROM affiliate_prospects
+       WHERE user_id = ? AND is_ignore_list = 1
+       ORDER BY updated_at DESC`,
+      [userId]
+    );
+
+    return res.json({ users: rows || [] });
+  } catch (error) {
+    console.error('Ignore list fetch error:', error);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+router.post('/affiliate/ignore-list', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const rawUsername = String(req.body?.username || '').trim();
+
+    if (!rawUsername) {
+      return res.status(400).json({ message: 'username is required' });
+    }
+
+    const username = rawUsername
+      .replace(/^https?:\/\/www\.tiktok\.com\/@/i, '')
+      .replace(/^https?:\/\/tiktok\.com\/@/i, '')
+      .replace(/^@/, '')
+      .split('/')[0]
+      .trim()
+      .toLowerCase();
+
+    if (!/^[a-z0-9._]{2,24}$/i.test(username)) {
+      return res.status(400).json({ message: 'Invalid TikTok username format' });
+    }
+
+    const profileUrl = `https://www.tiktok.com/@${username}`;
+
+    await db.query(
+      `INSERT INTO affiliate_prospects (user_id, tiktok_username, profile_url, is_ignore_list, is_keep_in_touch)
+       VALUES (?, ?, ?, 1, 0)
+       ON DUPLICATE KEY UPDATE
+         profile_url = VALUES(profile_url),
+         is_ignore_list = 1,
+         is_keep_in_touch = 0`,
+      [userId, username, profileUrl]
+    );
+
+    return res.json({
+      success: true,
+      username,
+      profile_url: profileUrl
+    });
+  } catch (error) {
+    console.error('Ignore list add error:', error);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+router.delete('/affiliate/ignore-list/:prospectId', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const prospectId = parseInt(req.params.prospectId, 10);
+
+    if (!Number.isFinite(prospectId)) {
+      return res.status(400).json({ message: 'Invalid prospectId' });
+    }
+
+    const [rows]: any = await db.query(
+      'SELECT id FROM affiliate_prospects WHERE id = ? AND user_id = ? LIMIT 1',
+      [prospectId, userId]
+    );
+
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({ message: 'Prospect not found' });
+    }
+
+    await db.query(
+      'UPDATE affiliate_prospects SET is_ignore_list = 0 WHERE id = ? AND user_id = ?',
+      [prospectId, userId]
+    );
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Ignore list remove error:', error);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // Toggle pause state for a TikTok account
 router.post('/accounts/:accountId/toggle-pause', authenticateToken, async (req: AuthRequest, res) => {
   try {

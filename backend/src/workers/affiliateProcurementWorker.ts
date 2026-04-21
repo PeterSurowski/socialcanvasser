@@ -46,6 +46,7 @@ interface ProspectRow {
   is_following: number | boolean;
   is_following_us: number | boolean;
   is_keep_in_touch: number | boolean;
+  is_ignore_list: number | boolean;
   snoozed_until: string | null;
   dm_sent: number | boolean;
 }
@@ -1040,6 +1041,10 @@ async function findNextEligibleProspect(
 
   for (const prospect of prospects) {
     if (prospect.snoozed_until && new Date(prospect.snoozed_until) > now) {
+      continue;
+    }
+
+    if (asBool(prospect.is_ignore_list)) {
       continue;
     }
 
