@@ -34,6 +34,9 @@ Thumbs.db
 *.db
 *.sqlite
 
+# Affiliate data exports (use git add -f to intentionally commit for transfers)
+affiliate-data-export-*.sql
+
 # Puppeteer
 .cache/
 puppeteer/

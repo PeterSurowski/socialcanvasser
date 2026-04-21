@@ -8,6 +8,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "migrate": "tsx src/database/migrate.ts",
+    "export:affiliate": "tsx scripts/export-affiliate-data.ts",
     "migrate:build": "node dist/database/migrate.js"
   },
   "dependencies": {
