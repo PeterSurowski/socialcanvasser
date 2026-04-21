@@ -684,9 +684,97 @@ async function getSearchVideoCandidates(page: Page, keyword: string): Promise<Se
     console.log(`[Affiliate Worker] Search results render wait timed out for keyword "${keyword}"`);
   }
 
-  for (let i = 0; i < 4; i++) {
-    await page.evaluate(() => window.scrollBy(0, window.innerHeight * 0.9));
-    await delay(1100);
+  // Smart scrolling: use mouse wheel and verify content loading
+  try {
+    const scrollInfo = await page.evaluate(() => {
+      // Count initial videos
+      const initialItems = document.querySelectorAll('[data-e2e="search_top-item"]');
+      const initialCount = initialItems.length;
+
+      // Find scrollable container
+      const containers = Array.from(document.querySelectorAll('[data-e2e="search_top-item-list"], [class*="DivItemContainer"], main, [role="main"]'));
+
+      const container = containers.find(el => {
+        const rect = el.getBoundingClientRect();
+        return rect.width > 300 && rect.height > 300;
+      }) as HTMLElement | undefined;
+
+      if (container) {
+        const rect = container.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+
+        return {
+          found: true,
+          x,
+          y,
+          initialCount,
+          containerTag: container.tagName
+        };
+      }
+
+      return { found: false, initialCount };
+    });
+
+    console.log(`[Affiliate Worker] Initial videos loaded: ${scrollInfo.initialCount}`);
+
+    if (scrollInfo.found) {
+      console.log(`[Affiliate Worker] Scrollable container found: <${scrollInfo.containerTag}>`);
+
+      // Position mouse over search results container
+      await page.mouse.move(scrollInfo.x, scrollInfo.y);
+      await delay(1500);
+
+      let loadedVideos = scrollInfo.initialCount;
+      let scrollAttempts = 0;
+      const maxScrollAttempts = 100;
+      const targetCreators = 200;
+      let noChangeCount = 0;
+
+      while (scrollAttempts < maxScrollAttempts) {
+        scrollAttempts++;
+        const beforeCount = loadedVideos;
+
+        // Use mouse wheel scroll (triggers TikTok's lazy loading)
+        await page.mouse.wheel({ deltaY: 800 });
+
+        // Wait for TikTok's lazy loading
+        await delay(2000);
+
+        // Count videos after scroll
+        loadedVideos = await page.evaluate(() => {
+          return document.querySelectorAll('[data-e2e="search_top-item"]').length;
+        });
+
+        const increased = loadedVideos > beforeCount;
+
+        // Log progress
+        if (scrollAttempts % 5 === 0 || increased || scrollAttempts <= 3) {
+          console.log(`[Affiliate Worker] Scroll ${scrollAttempts}: ${beforeCount} → ${loadedVideos} videos ${increased ? '✅' : '⚠️'}`);
+        }
+
+        // Stop if no progress after 5 consecutive attempts
+        if (!increased) {
+          noChangeCount++;
+          if (noChangeCount >= 5) {
+            console.log(`[Affiliate Worker] No new videos after ${noChangeCount} scroll attempts - stopping at ${loadedVideos} videos (all available)`);
+            break;
+          }
+        } else {
+          noChangeCount = 0;
+        }
+      }
+
+      if (scrollAttempts >= maxScrollAttempts) {
+        console.log(`[Affiliate Worker] Reached max scroll attempts (${maxScrollAttempts}), proceeding with ${loadedVideos} videos`);
+      }
+
+      console.log(`[Affiliate Worker] Scrolling complete: loaded ${loadedVideos} videos in ${scrollAttempts} scroll attempts`);
+    } else {
+      console.log(`[Affiliate Worker] Could not find scrollable container, proceeding with initially loaded videos`);
+    }
+  } catch (scrollErr) {
+    console.log(`[Affiliate Worker] Error during scroll:`, scrollErr);
   }
 
   const rawUrls: string[] = await page.evaluate(() => {
@@ -699,14 +787,14 @@ async function getSearchVideoCandidates(page: Page, keyword: string): Promise<Se
       .filter(Boolean);
 
     if (cardUrls.length > 0) {
-      return cardUrls.slice(0, 120);
+      return cardUrls.slice(0, 500);
     }
 
     const fallback = Array.from(document.querySelectorAll('a[href*="/video/"]')) as HTMLAnchorElement[];
     return fallback
       .map(link => link.getAttribute('href') || '')
       .filter(Boolean)
-      .slice(0, 120);
+      .slice(0, 500);
   });
 
   const seenUrl = new Set<string>();
