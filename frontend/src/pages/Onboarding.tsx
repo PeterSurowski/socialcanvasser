@@ -11,10 +11,15 @@ import SnoozeSettings from '../components/onboarding/SnoozeSettings'
 import AffiliateInvitationText from '../components/onboarding/AffiliateInvitationText'
 import AffiliateDmPrompt from '../components/onboarding/AffiliateDmPrompt'
 
+interface OnboardingTikTokAccount {
+  nickname: string
+  groupName: string
+}
+
 export default function Onboarding() {
   const [step, setStep] = useState(1)
   const [data, setData] = useState({
-    tiktokAccounts: [] as string[],
+    tiktokAccounts: [] as OnboardingTikTokAccount[],
     keywords: '',
     aiPrompt: '',
     creatorMessage: '',

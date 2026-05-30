@@ -11,7 +11,19 @@ interface SettingsData {
   brand_voice: string;
   snooze_days: number;
   keep_in_touch_snooze_days: number;
+  min_affiliate_followers: number;
   affiliate_dm_eds_threshold: number;
+  affiliate_dm_prompt: string;
+  affiliate_invitation_text: string;
+}
+
+interface GroupSettings {
+  id: number;
+  name: string;
+  ai_prompt: string;
+  example_dm: string;
+  example_comment: string;
+  brand_voice: string;
   affiliate_dm_prompt: string;
   affiliate_invitation_text: string;
 }
@@ -28,10 +40,14 @@ export default function Settings() {
     brand_voice: '',
     snooze_days: 3,
     keep_in_touch_snooze_days: 14,
+    min_affiliate_followers: 2000,
     affiliate_dm_eds_threshold: 4,
     affiliate_dm_prompt: '',
     affiliate_invitation_text: '',
   })
+  const [groupSettings, setGroupSettings] = useState<GroupSettings[]>([])
+  const [selectedGroupId, setSelectedGroupId] = useState<number | null>(null)
+  const [savingGroup, setSavingGroup] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
@@ -61,10 +77,24 @@ export default function Settings() {
           brand_voice: data.config.brand_voice || '',
           snooze_days: data.config.snooze_days ?? 3,
           keep_in_touch_snooze_days: data.config.keep_in_touch_snooze_days ?? 14,
+          min_affiliate_followers: data.config.min_affiliate_followers ?? 2000,
           affiliate_dm_eds_threshold: data.config.affiliate_dm_eds_threshold ?? 4,
           affiliate_dm_prompt: data.config.affiliate_dm_prompt || '',
           affiliate_invitation_text: data.config.affiliate_invitation_text || '',
         })
+      }
+
+      const groupsRes = await fetch('/api/settings/groups', {
+        headers: { Authorization: `Bearer ${token}` }
+      })
+
+      if (groupsRes.ok) {
+        const groupsData = await groupsRes.json()
+        const groups = (groupsData.groups || []) as GroupSettings[]
+        setGroupSettings(groups)
+        if (groups.length > 0) {
+          setSelectedGroupId(groups[0].id)
+        }
       }
     } catch (error) {
       console.error('Failed to fetch settings:', error)
@@ -98,6 +128,7 @@ export default function Settings() {
           brandVoice: settings.brand_voice,
           snoozeDays: settings.snooze_days,
           keepInTouchSnoozeDays: settings.keep_in_touch_snooze_days,
+          minAffiliateFollowers: settings.min_affiliate_followers,
           affiliateDmEdsThreshold: settings.affiliate_dm_eds_threshold,
           affiliateDmPrompt: settings.affiliate_dm_prompt,
           affiliateInvitationText: settings.affiliate_invitation_text,
@@ -115,6 +146,50 @@ export default function Settings() {
       setMessage({ type: 'error', text: 'Failed to save settings' })
     } finally {
       setSaving(false)
+    }
+  }
+
+  const selectedGroup = groupSettings.find((g) => g.id === selectedGroupId) || null
+
+  const handleGroupChange = (field: keyof GroupSettings, value: string) => {
+    if (!selectedGroup) return
+    setGroupSettings((prev) => prev.map((g) => (g.id === selectedGroup.id ? { ...g, [field]: value } : g)))
+  }
+
+  const saveSelectedGroupSettings = async () => {
+    if (!selectedGroup) return
+
+    setSavingGroup(true)
+    setMessage(null)
+    try {
+      const token = localStorage.getItem('token')
+      const res = await fetch(`/api/settings/groups/${selectedGroup.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          aiPrompt: selectedGroup.ai_prompt,
+          exampleDM: selectedGroup.example_dm,
+          exampleComment: selectedGroup.example_comment,
+          brandVoice: selectedGroup.brand_voice,
+          affiliateDmPrompt: selectedGroup.affiliate_dm_prompt,
+          affiliateInvitationText: selectedGroup.affiliate_invitation_text
+        })
+      })
+
+      if (res.ok) {
+        setMessage({ type: 'success', text: `Saved Group settings for ${selectedGroup.name}` })
+      } else {
+        const data = await res.json().catch(() => ({}))
+        setMessage({ type: 'error', text: data?.message || 'Failed to save Group settings' })
+      }
+    } catch (error) {
+      console.error('Failed to save Group settings:', error)
+      setMessage({ type: 'error', text: 'Failed to save Group settings' })
+    } finally {
+      setSavingGroup(false)
     }
   }
 
@@ -266,6 +341,22 @@ export default function Settings() {
         {/* Snooze Days */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
+            Minimum number of affiliate followers
+          </label>
+          <input
+            type="number"
+            min="1"
+            value={settings.min_affiliate_followers}
+            onChange={(e) => handleChange('min_affiliate_followers', parseInt(e.target.value) || 2000)}
+            className="w-40 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            This is the minimum number of followers a TikTok user must have before the algorithm will treat the TikTok user as a prospective brand affiliate. Recommended: 2,000.
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
             Days to wait before sending affiliate DM
           </label>
           <input
@@ -279,6 +370,109 @@ export default function Settings() {
           <p className="text-xs text-gray-500 mt-1">
             After commenting on a creator&apos;s video, wait this many days before DMing them
           </p>
+        </div>
+
+        <div className="pt-6 border-t border-gray-200">
+          <h3 className="text-lg font-semibold text-gray-800 mb-1">Group Prompt Settings</h3>
+          <p className="text-sm text-gray-500 mb-4">
+            Each Group has its own AI Prompt, templates, and affiliate DM prompts. Accounts inherit from their assigned Group.
+          </p>
+
+          {groupSettings.length === 0 ? (
+            <div className="text-sm text-gray-500">No Groups found yet. Add accounts with Groups during onboarding.</div>
+          ) : (
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Group</label>
+                <select
+                  value={selectedGroupId ?? ''}
+                  onChange={(e) => setSelectedGroupId(Number(e.target.value))}
+                  className="px-3 py-2 border border-gray-300 rounded-lg"
+                >
+                  {groupSettings.map((group) => (
+                    <option key={group.id} value={group.id}>
+                      {group.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {selectedGroup && (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">AI Prompt</label>
+                    <textarea
+                      value={selectedGroup.ai_prompt || ''}
+                      onChange={(e) => handleGroupChange('ai_prompt', e.target.value)}
+                      rows={4}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Example DM Template</label>
+                    <textarea
+                      value={selectedGroup.example_dm || ''}
+                      onChange={(e) => handleGroupChange('example_dm', e.target.value)}
+                      rows={3}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Example Comment Reply Template</label>
+                    <textarea
+                      value={selectedGroup.example_comment || ''}
+                      onChange={(e) => handleGroupChange('example_comment', e.target.value)}
+                      rows={3}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Brand Voice</label>
+                    <textarea
+                      value={selectedGroup.brand_voice || ''}
+                      onChange={(e) => handleGroupChange('brand_voice', e.target.value)}
+                      rows={3}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Affiliate DM Writing Instructions</label>
+                    <textarea
+                      value={selectedGroup.affiliate_dm_prompt || ''}
+                      onChange={(e) => handleGroupChange('affiliate_dm_prompt', e.target.value)}
+                      rows={4}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Affiliate Invitation DM</label>
+                    <textarea
+                      value={selectedGroup.affiliate_invitation_text || ''}
+                      onChange={(e) => handleGroupChange('affiliate_invitation_text', e.target.value)}
+                      rows={4}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                    />
+                  </div>
+
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={saveSelectedGroupSettings}
+                      disabled={savingGroup}
+                      className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+                    >
+                      {savingGroup ? 'Saving Group...' : 'Save Group Settings'}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         <div>

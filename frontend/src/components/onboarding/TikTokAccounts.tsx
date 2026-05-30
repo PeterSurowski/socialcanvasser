@@ -1,8 +1,8 @@
 import { useState } from 'react'
 
 interface TikTokAccountsProps {
-  accounts: string[]
-  onUpdate: (accounts: string[]) => void
+  accounts: Array<{ nickname: string; groupName: string }>
+  onUpdate: (accounts: Array<{ nickname: string; groupName: string }>) => void
   onNext: () => void
 }
 
@@ -11,6 +11,7 @@ type BrowserType = 'chrome_debug' | 'incogniton'
 export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAccountsProps) {
   const [showSetupModal, setShowSetupModal] = useState(false)
   const [currentAccountName, setCurrentAccountName] = useState('')
+  const [groupName, setGroupName] = useState('')
   const [currentAccountId, setCurrentAccountId] = useState<number | null>(null)
   const [browserType, setBrowserType] = useState<BrowserType>('incogniton') // Default to Incogniton
   const [incognitonProfileId, setIncognitonProfileId] = useState('')
@@ -23,10 +24,15 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
     setSetupStep('instructions')
     setBrowserType('incogniton') // Reset to default
     setIncognitonProfileId('')
+    setGroupName('')
   }
 
   const handleStartSetup = async () => {
     if (!currentAccountName) return
+    if (!groupName.trim()) {
+      alert('Please enter a Group name')
+      return
+    }
     if (browserType === 'incogniton' && !incognitonProfileId) {
       alert('Please enter your Incogniton Profile ID')
       return
@@ -42,6 +48,7 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
         },
         body: JSON.stringify({ 
           nickname: currentAccountName,
+          groupName,
           browserType,
           incognitonProfileId: browserType === 'incogniton' ? incognitonProfileId : undefined
         })
@@ -56,10 +63,11 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
       
       // For Incogniton accounts, skip verification step (already active)
       if (data.isActive) {
-        onUpdate([...accounts, currentAccountName]) // Add to account list
+        onUpdate([...accounts, { nickname: currentAccountName, groupName: groupName.trim() }]) // Add to account list
         setShowSetupModal(false)
         setCurrentAccountName('')
         setIncognitonProfileId('')
+        setGroupName('')
       } else {
         // Chrome Debug mode - needs verification
         setSetupStep('verify')
@@ -91,11 +99,12 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
       }
 
       // Success!
-      onUpdate([...accounts, currentAccountName])
+      onUpdate([...accounts, { nickname: currentAccountName, groupName: groupName.trim() }])
       setShowSetupModal(false)
       setCurrentAccountName('')
       setCurrentAccountId(null)
       setSetupStep('instructions')
+      setGroupName('')
     } catch (error: any) {
       console.error('Verification error:', error)
       alert(error.message || 'Failed to verify Chrome. Make sure you launched Chrome using the launch-chrome.bat script.')
@@ -113,7 +122,10 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
 
       {accounts.map((account, index) => (
         <div key={index} className="flex items-center justify-between p-3 bg-green-50 border border-green-200 rounded-lg">
-          <span className="font-medium text-green-800">@{account}</span>
+          <div>
+            <div className="font-medium text-green-800">@{account.nickname}</div>
+            <div className="text-xs text-green-700">Group: {account.groupName}</div>
+          </div>
           <button
             onClick={() => onUpdate(accounts.filter((_, i) => i !== index))}
             className="text-red-600 hover:text-red-800"
@@ -162,6 +174,22 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
                       placeholder="e.g., MyMainAccount"
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                     />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Group
+                    </label>
+                    <input
+                      type="text"
+                      value={groupName}
+                      onChange={(e) => setGroupName(e.target.value)}
+                      placeholder="e.g., Dominique"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Accounts in the same Group share prompts and cannot work the same prospect.
+                    </p>
                   </div>
 
                   <div>
@@ -279,6 +307,7 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
                       setShowSetupModal(false)
                       setCurrentAccountName('')
                       setIncognitonProfileId('')
+                      setGroupName('')
                     }}
                     className="flex-1 py-2 px-4 border border-gray-300 rounded-lg hover:bg-gray-50"
                   >
@@ -286,7 +315,7 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
                   </button>
                   <button
                     onClick={handleStartSetup}
-                    disabled={!currentAccountName || (browserType === 'incogniton' && !incognitonProfileId)}
+                    disabled={!currentAccountName || !groupName.trim() || (browserType === 'incogniton' && !incognitonProfileId)}
                     className="flex-1 py-2 px-4 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
                   >
                     {browserType === 'incogniton' ? 'Profile Ready' : 'Start Setup'}

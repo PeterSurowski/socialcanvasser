@@ -8,7 +8,22 @@ const router = Router();
 router.post('/complete', authenticateToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.userId;
-    const { tiktokAccounts, keywords, aiPrompt, creatorMessage, exampleDM, exampleComment, openaiKey, brandVoice, snoozeDays, keepInTouchSnoozeDays, affiliateDmPrompt, affiliateInvitationText, affiliateDmEdsThreshold } = req.body;
+    const {
+      tiktokAccounts,
+      keywords,
+      aiPrompt,
+      creatorMessage,
+      exampleDM,
+      exampleComment,
+      openaiKey,
+      brandVoice,
+      snoozeDays,
+      keepInTouchSnoozeDays,
+      affiliateDmPrompt,
+      affiliateInvitationText,
+      affiliateDmEdsThreshold,
+      minAffiliateFollowers
+    } = req.body;
 
     // Validation
     if (!keywords || !aiPrompt || !exampleDM || !exampleComment || !openaiKey) {
@@ -25,7 +40,32 @@ router.post('/complete', authenticateToken, async (req: AuthRequest, res) => {
 
     try {
       // Save TikTok accounts (skip if already created via /tiktok/connect)
-      for (const accountName of tiktokAccounts) {
+      // Supports legacy shape (string[]) and new shape ({nickname, groupName}[]).
+      for (const accountEntry of tiktokAccounts) {
+        const accountName = typeof accountEntry === 'string' ? accountEntry : String(accountEntry?.nickname || '').trim();
+        const groupNameRaw = typeof accountEntry === 'string' ? '' : String(accountEntry?.groupName || '').trim();
+        const groupName = groupNameRaw || 'Default';
+
+        if (!accountName) {
+          continue;
+        }
+
+        const [groupRows]: any = await connection.query(
+          'SELECT id FROM account_groups WHERE user_id = ? AND name = ? LIMIT 1',
+          [userId, groupName]
+        );
+
+        let groupId: number;
+        if (Array.isArray(groupRows) && groupRows.length > 0) {
+          groupId = Number(groupRows[0].id);
+        } else {
+          const [groupInsert]: any = await connection.query(
+            'INSERT INTO account_groups (user_id, name) VALUES (?, ?)',
+            [userId, groupName]
+          );
+          groupId = Number(groupInsert.insertId);
+        }
+
         // Check if account already exists
         const [existing] = await connection.query(
           'SELECT id FROM tiktok_accounts WHERE user_id = ? AND account_identifier = ?',
@@ -35,11 +75,15 @@ router.post('/complete', authenticateToken, async (req: AuthRequest, res) => {
         if (!Array.isArray(existing) || existing.length === 0) {
           // Only create if it doesn't exist
           await connection.query(
-            'INSERT INTO tiktok_accounts (user_id, account_identifier, is_active) VALUES (?, ?, ?)',
-            [userId, accountName, true]
+            'INSERT INTO tiktok_accounts (user_id, group_id, account_identifier, is_active) VALUES (?, ?, ?, ?)',
+            [userId, groupId, accountName, true]
           );
           console.log(`[Onboarding Complete] Created account "${accountName}" for user ${userId}`);
         } else {
+          await connection.query(
+            'UPDATE tiktok_accounts SET group_id = ? WHERE id = ?',
+            [groupId, (existing[0] as any).id]
+          );
           console.log(`[Onboarding Complete] Account "${accountName}" already exists for user ${userId}, skipping`);
         }
       }
@@ -47,8 +91,8 @@ router.post('/complete', authenticateToken, async (req: AuthRequest, res) => {
       // Save configuration
       await connection.query(
         `INSERT INTO user_config 
-         (user_id, keywords, ai_prompt, creator_message, example_dm, example_comment, openai_api_key, is_onboarding_complete, brand_voice, snooze_days, keep_in_touch_snooze_days, affiliate_dm_prompt, affiliate_invitation_text, affiliate_dm_eds_threshold) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         (user_id, keywords, ai_prompt, creator_message, example_dm, example_comment, openai_api_key, is_onboarding_complete, brand_voice, snooze_days, keep_in_touch_snooze_days, affiliate_dm_prompt, affiliate_invitation_text, affiliate_dm_eds_threshold, min_affiliate_followers) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE 
          keywords = VALUES(keywords),
          ai_prompt = VALUES(ai_prompt),
@@ -62,8 +106,9 @@ router.post('/complete', authenticateToken, async (req: AuthRequest, res) => {
          keep_in_touch_snooze_days = VALUES(keep_in_touch_snooze_days),
          affiliate_dm_prompt = VALUES(affiliate_dm_prompt),
          affiliate_invitation_text = VALUES(affiliate_invitation_text),
-         affiliate_dm_eds_threshold = VALUES(affiliate_dm_eds_threshold)`,
-        [userId, keywords, aiPrompt, creatorMessage || null, exampleDM, exampleComment, openaiKey, true, brandVoice || null, snoozeDays || 3, keepInTouchSnoozeDays || 14, affiliateDmPrompt || null, affiliateInvitationText || null, affiliateDmEdsThreshold || 4]
+         affiliate_dm_eds_threshold = VALUES(affiliate_dm_eds_threshold),
+         min_affiliate_followers = VALUES(min_affiliate_followers)`,
+        [userId, keywords, aiPrompt, creatorMessage || null, exampleDM, exampleComment, openaiKey, true, brandVoice || null, snoozeDays || 3, keepInTouchSnoozeDays || 14, affiliateDmPrompt || null, affiliateInvitationText || null, affiliateDmEdsThreshold || 4, minAffiliateFollowers || 2000]
       );
 
       // Initialize automation state
@@ -93,9 +138,10 @@ router.post('/complete', authenticateToken, async (req: AuthRequest, res) => {
 router.post('/tiktok/connect', authenticateToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.userId;
-    const { nickname, browserType, incognitonProfileId } = req.body;
+    const { nickname, groupName, browserType, incognitonProfileId } = req.body;
     
     if (!nickname) return res.status(400).json({ message: 'Nickname required' });
+    if (!groupName || !String(groupName).trim()) return res.status(400).json({ message: 'Group is required' });
     
     // Validate Incogniton requirements
     if (browserType === 'incogniton' && !incognitonProfileId) {
@@ -105,6 +151,24 @@ router.post('/tiktok/connect', authenticateToken, async (req: AuthRequest, res) 
     const connection = await db.getConnection();
     await connection.beginTransaction();
     try {
+      const normalizedGroupName = String(groupName).trim();
+
+      const [groupRows]: any = await connection.query(
+        'SELECT id FROM account_groups WHERE user_id = ? AND name = ? LIMIT 1',
+        [userId, normalizedGroupName]
+      );
+
+      let groupId: number;
+      if (Array.isArray(groupRows) && groupRows.length > 0) {
+        groupId = Number(groupRows[0].id);
+      } else {
+        const [groupInsert]: any = await connection.query(
+          'INSERT INTO account_groups (user_id, name) VALUES (?, ?)',
+          [userId, normalizedGroupName]
+        );
+        groupId = Number(groupInsert.insertId);
+      }
+
       // Check if account with this nickname already exists for this user (prevent duplicates)
       const [existing] = await connection.query(
         'SELECT id FROM tiktok_accounts WHERE user_id = ? AND account_identifier = ?',
@@ -117,9 +181,12 @@ router.post('/tiktok/connect', authenticateToken, async (req: AuthRequest, res) 
         console.log(`[Onboarding] Account "${nickname}" already exists for user ${userId}, returning existing ID`);
         // Return existing account instead of creating duplicate
         const isActive = browserType === 'incogniton';
+        await connection.query('UPDATE tiktok_accounts SET group_id = ? WHERE id = ?', [groupId, (existing[0] as any).id]);
         return res.json({ 
           message: 'Account already exists', 
           accountId: (existing[0] as any).id,
+          groupId,
+          groupName: normalizedGroupName,
           browserType: browserType || 'chrome_debug',
           isActive,
           launchCommand: browserType === 'incogniton' ? null : 'launch-chrome.bat'
@@ -133,8 +200,8 @@ router.post('/tiktok/connect', authenticateToken, async (req: AuthRequest, res) 
         : { type: 'local-chrome', ready: false };
       
       const [result] = await connection.query(
-        'INSERT INTO tiktok_accounts (user_id, account_identifier, browser_type, incogniton_profile_id, is_active, session_data) VALUES (?, ?, ?, ?, ?, ?)',
-        [userId, nickname, browserType || 'chrome_debug', incognitonProfileId || null, isActive, JSON.stringify(sessionData)]
+        'INSERT INTO tiktok_accounts (user_id, group_id, account_identifier, browser_type, incogniton_profile_id, is_active, session_data) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [userId, groupId, nickname, browserType || 'chrome_debug', incognitonProfileId || null, isActive, JSON.stringify(sessionData)]
       );
 
       await connection.commit();
@@ -146,6 +213,8 @@ router.post('/tiktok/connect', authenticateToken, async (req: AuthRequest, res) 
       return res.json({ 
         message: 'Account created', 
         accountId,
+        groupId,
+        groupName: normalizedGroupName,
         browserType: browserType || 'chrome_debug',
         isActive,
         launchCommand: browserType === 'incogniton' ? null : 'launch-chrome.bat'

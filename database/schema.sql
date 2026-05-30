@@ -16,10 +16,23 @@ CREATE TABLE IF NOT EXISTS users (
     INDEX idx_email (email)
 );
 
+-- Account groups (Group names are user-defined)
+CREATE TABLE IF NOT EXISTS account_groups (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE KEY unique_account_group_name (user_id, name),
+    INDEX idx_account_groups_user_id (user_id)
+);
+
 -- TikTok accounts table (with ALL migrations applied)
 CREATE TABLE IF NOT EXISTS tiktok_accounts (
     id INT PRIMARY KEY AUTO_INCREMENT,
     user_id INT NOT NULL,
+    group_id INT NULL,
     account_identifier VARCHAR(255) NOT NULL,
     session_data TEXT,
     incogniton_profile_id VARCHAR(255) DEFAULT NULL COMMENT 'Incogniton browser profile ID for persistent session management',
@@ -42,7 +55,9 @@ CREATE TABLE IF NOT EXISTS tiktok_accounts (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (group_id) REFERENCES account_groups(id) ON DELETE SET NULL,
     INDEX idx_user_id (user_id),
+    INDEX idx_tiktok_accounts_group_id (group_id),
     INDEX idx_incogniton_profile_id (incogniton_profile_id),
     INDEX idx_tiktok_accounts_rate_limited (is_rate_limited, rate_limit_expires_at),
     INDEX idx_tiktok_accounts_paused (is_paused),
@@ -64,6 +79,7 @@ CREATE TABLE IF NOT EXISTS user_config (
     keep_in_touch_snooze_days INT DEFAULT 14,
     affiliate_invitation_text TEXT DEFAULT NULL,
     affiliate_dm_eds_threshold INT DEFAULT 4,
+    min_affiliate_followers INT DEFAULT 2000,
     affiliate_automation_enabled BOOLEAN DEFAULT FALSE,
     is_onboarding_complete BOOLEAN DEFAULT FALSE,
     automation_enabled BOOLEAN DEFAULT TRUE,
@@ -177,6 +193,25 @@ CREATE TABLE IF NOT EXISTS automation_state (
     FOREIGN KEY (current_tiktok_account_id) REFERENCES tiktok_accounts(id) ON DELETE SET NULL
 );
 
+-- Per-group prompt configuration used by accounts that belong to the group.
+CREATE TABLE IF NOT EXISTS group_prompt_config (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    group_id INT NOT NULL,
+    ai_prompt TEXT DEFAULT NULL,
+    example_dm TEXT DEFAULT NULL,
+    example_comment TEXT DEFAULT NULL,
+    brand_voice TEXT DEFAULT NULL,
+    affiliate_dm_prompt TEXT DEFAULT NULL,
+    affiliate_invitation_text TEXT DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (group_id) REFERENCES account_groups(id) ON DELETE CASCADE,
+    UNIQUE KEY unique_group_prompt_config (user_id, group_id),
+    INDEX idx_group_prompt_user_group (user_id, group_id)
+);
+
 -- Affiliate procurement tables
 CREATE TABLE IF NOT EXISTS affiliate_prospects (
     id INT PRIMARY KEY AUTO_INCREMENT,
@@ -187,6 +222,8 @@ CREATE TABLE IF NOT EXISTS affiliate_prospects (
     engagement_depth_score INT DEFAULT 0,
     interaction_sessions INT DEFAULT 0,
     bio_scraped BOOLEAN DEFAULT FALSE,
+    follower_count BIGINT NULL,
+    prospect_type ENUM('prospective_affiliate', 'prospective_customer', 'status_unknown', 'disqualified') DEFAULT NULL,
     bio_text TEXT NULL,
     user_title VARCHAR(255) NULL,
     is_following BOOLEAN DEFAULT FALSE,
@@ -205,7 +242,39 @@ CREATE TABLE IF NOT EXISTS affiliate_prospects (
     INDEX idx_ap_user_id (user_id),
     INDEX idx_ap_snoozed_until (snoozed_until),
     INDEX idx_ap_dm_sent (dm_sent),
-    INDEX idx_ap_ignore_list (user_id, is_ignore_list)
+    INDEX idx_ap_ignore_list (user_id, is_ignore_list),
+    INDEX idx_ap_prospect_type (user_id, prospect_type)
+);
+
+-- Same group cannot have two different accounts working the same prospect.
+-- Different groups can work the same prospect independently.
+CREATE TABLE IF NOT EXISTS affiliate_group_assignments (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    group_id INT NOT NULL,
+    prospect_id INT NOT NULL,
+    assigned_account_id INT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (group_id) REFERENCES account_groups(id) ON DELETE CASCADE,
+    FOREIGN KEY (prospect_id) REFERENCES affiliate_prospects(id) ON DELETE CASCADE,
+    FOREIGN KEY (assigned_account_id) REFERENCES tiktok_accounts(id) ON DELETE CASCADE,
+    UNIQUE KEY unique_affiliate_group_prospect (user_id, group_id, prospect_id),
+    INDEX idx_aga_user_group_account (user_id, group_id, assigned_account_id),
+    INDEX idx_aga_prospect (prospect_id)
+);
+
+CREATE TABLE IF NOT EXISTS affiliate_special_notes (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    tiktok_username VARCHAR(255) NOT NULL,
+    note_text TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_asn_user_username (user_id, tiktok_username),
+    INDEX idx_asn_user_created (user_id, created_at)
 );
 
 CREATE TABLE IF NOT EXISTS affiliate_interacted_videos (

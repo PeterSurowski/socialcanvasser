@@ -10,7 +10,7 @@ router.get('/', authenticateToken, async (req: AuthRequest, res) => {
     const userId = req.userId;
 
     const [config]: any = await db.query(
-      'SELECT keywords, ai_prompt, creator_message, example_dm, example_comment, openai_api_key, brand_voice, snooze_days, keep_in_touch_snooze_days, affiliate_dm_prompt, affiliate_invitation_text, affiliate_dm_eds_threshold FROM user_config WHERE user_id = ?',
+      'SELECT keywords, ai_prompt, creator_message, example_dm, example_comment, openai_api_key, brand_voice, snooze_days, keep_in_touch_snooze_days, affiliate_dm_prompt, affiliate_invitation_text, affiliate_dm_eds_threshold, min_affiliate_followers FROM user_config WHERE user_id = ?',
       [userId]
     );
 
@@ -44,18 +44,113 @@ router.get('/', authenticateToken, async (req: AuthRequest, res) => {
   }
 });
 
+router.get('/groups', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+
+    const [groups]: any = await db.query(
+      `SELECT g.id, g.name,
+              gp.ai_prompt, gp.example_dm, gp.example_comment,
+              gp.brand_voice, gp.affiliate_dm_prompt, gp.affiliate_invitation_text
+       FROM account_groups g
+       LEFT JOIN group_prompt_config gp
+         ON gp.user_id = g.user_id AND gp.group_id = g.id
+       WHERE g.user_id = ?
+       ORDER BY g.name ASC`,
+      [userId]
+    );
+
+    return res.json({ groups: groups || [] });
+  } catch (error) {
+    console.error('Settings groups fetch error:', error);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+router.put('/groups/:groupId', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const groupId = Number(req.params.groupId);
+
+    if (!Number.isFinite(groupId)) {
+      return res.status(400).json({ message: 'Invalid groupId' });
+    }
+
+    const [groupRows]: any = await db.query(
+      'SELECT id FROM account_groups WHERE id = ? AND user_id = ? LIMIT 1',
+      [groupId, userId]
+    );
+
+    if (!groupRows || groupRows.length === 0) {
+      return res.status(404).json({ message: 'Group not found' });
+    }
+
+    const {
+      aiPrompt,
+      exampleDM,
+      exampleComment,
+      brandVoice,
+      affiliateDmPrompt,
+      affiliateInvitationText
+    } = req.body || {};
+
+    await db.query(
+      `INSERT INTO group_prompt_config
+         (user_id, group_id, ai_prompt, example_dm, example_comment, brand_voice, affiliate_dm_prompt, affiliate_invitation_text)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         ai_prompt = VALUES(ai_prompt),
+         example_dm = VALUES(example_dm),
+         example_comment = VALUES(example_comment),
+         brand_voice = VALUES(brand_voice),
+         affiliate_dm_prompt = VALUES(affiliate_dm_prompt),
+         affiliate_invitation_text = VALUES(affiliate_invitation_text)`,
+      [
+        userId,
+        groupId,
+        aiPrompt ?? null,
+        exampleDM ?? null,
+        exampleComment ?? null,
+        brandVoice ?? null,
+        affiliateDmPrompt ?? null,
+        affiliateInvitationText ?? null
+      ]
+    );
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Settings group update error:', error);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // Update settings
 router.put('/', authenticateToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.userId;
-    const { keywords, aiPrompt, creatorMessage, exampleDM, exampleComment, openaiApiKey, actionsPerSession, brandVoice, snoozeDays, keepInTouchSnoozeDays, affiliateDmPrompt, affiliateInvitationText, affiliateDmEdsThreshold } = req.body;
+    const {
+      keywords,
+      aiPrompt,
+      creatorMessage,
+      exampleDM,
+      exampleComment,
+      openaiApiKey,
+      actionsPerSession,
+      brandVoice,
+      snoozeDays,
+      keepInTouchSnoozeDays,
+      affiliateDmPrompt,
+      affiliateInvitationText,
+      affiliateDmEdsThreshold,
+      minAffiliateFollowers
+    } = req.body;
 
     await db.query(
       `UPDATE user_config 
        SET keywords = ?, ai_prompt = ?, creator_message = ?, example_dm = ?, example_comment = ?, openai_api_key = ?,
-           brand_voice = ?, snooze_days = ?, keep_in_touch_snooze_days = ?, affiliate_dm_prompt = ?, affiliate_invitation_text = ?, affiliate_dm_eds_threshold = ?
+           brand_voice = ?, snooze_days = ?, keep_in_touch_snooze_days = ?, affiliate_dm_prompt = ?, affiliate_invitation_text = ?, affiliate_dm_eds_threshold = ?, min_affiliate_followers = ?
        WHERE user_id = ?`,
-      [keywords, aiPrompt, creatorMessage, exampleDM, exampleComment, openaiApiKey, brandVoice ?? null, snoozeDays ?? 3, keepInTouchSnoozeDays ?? 14, affiliateDmPrompt ?? null, affiliateInvitationText ?? null, affiliateDmEdsThreshold ?? 4, userId]
+      [keywords, aiPrompt, creatorMessage, exampleDM, exampleComment, openaiApiKey, brandVoice ?? null, snoozeDays ?? 3, keepInTouchSnoozeDays ?? 14, affiliateDmPrompt ?? null, affiliateInvitationText ?? null, affiliateDmEdsThreshold ?? 4, minAffiliateFollowers ?? 2000, userId]
     );
 
     // Update actions_per_session for all user's TikTok accounts

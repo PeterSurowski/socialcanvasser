@@ -52,7 +52,11 @@ router.get('/stats', authenticateToken, async (req: AuthRequest, res) => {
     // Get TikTok accounts
     console.log(`[Dashboard Stats] Fetching accounts for user_id: ${userId}`);
     const [accounts]: any = await db.query(
-      'SELECT id, account_identifier, is_active, is_paused, last_used_at, actions_count, session_data FROM tiktok_accounts WHERE user_id = ?',
+      `SELECT ta.id, ta.account_identifier, ta.is_active, ta.is_paused, ta.last_used_at, ta.actions_count, ta.session_data,
+              ta.group_id, ag.name AS group_name
+       FROM tiktok_accounts ta
+       LEFT JOIN account_groups ag ON ag.id = ta.group_id
+       WHERE ta.user_id = ?`,
       [userId]
     );
     console.log(`[Dashboard Stats] Found ${accounts.length} accounts:`, accounts.map((a: any) => ({ id: a.id, name: a.account_identifier, user_id: userId })));
@@ -448,6 +452,132 @@ router.delete('/affiliate/ignore-list/:prospectId', authenticateToken, async (re
   }
 });
 
+router.get('/affiliate/special-notes', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+
+    const [rows]: any = await db.query(
+      `SELECT id, tiktok_username, note_text, created_at, updated_at
+       FROM affiliate_special_notes
+       WHERE user_id = ?
+       ORDER BY created_at DESC`,
+      [userId]
+    );
+
+    return res.json({ notes: rows || [] });
+  } catch (error) {
+    console.error('Special notes list error:', error);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+router.get('/affiliate/special-notes/:username', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const username = String(req.params.username || '').replace(/^@/, '').trim().toLowerCase();
+
+    if (!username) {
+      return res.status(400).json({ message: 'Username is required' });
+    }
+
+    const [rows]: any = await db.query(
+      `SELECT id, tiktok_username, note_text, created_at, updated_at
+       FROM affiliate_special_notes
+       WHERE user_id = ? AND tiktok_username = ?
+       ORDER BY created_at DESC`,
+      [userId, username]
+    );
+
+    return res.json({ username, notes: rows || [] });
+  } catch (error) {
+    console.error('Special notes detail error:', error);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+router.post('/affiliate/special-notes', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const rawUsername = String(req.body?.username || '').trim();
+    const noteText = String(req.body?.noteText || '').trim();
+
+    if (!rawUsername || !noteText) {
+      return res.status(400).json({ message: 'username and noteText are required' });
+    }
+
+    const username = rawUsername
+      .replace(/^https?:\/\/www\.tiktok\.com\/@/i, '')
+      .replace(/^https?:\/\/tiktok\.com\/@/i, '')
+      .replace(/^@/, '')
+      .split('/')[0]
+      .trim()
+      .toLowerCase();
+
+    if (!/^[a-z0-9._]{2,24}$/i.test(username)) {
+      return res.status(400).json({ message: 'Invalid TikTok username format' });
+    }
+
+    const [result]: any = await db.query(
+      `INSERT INTO affiliate_special_notes (user_id, tiktok_username, note_text)
+       VALUES (?, ?, ?)`,
+      [userId, username, noteText]
+    );
+
+    return res.json({ success: true, id: result.insertId, username });
+  } catch (error) {
+    console.error('Special notes create error:', error);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+router.put('/affiliate/special-notes/:noteId', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const noteId = Number(req.params.noteId);
+    const noteText = String(req.body?.noteText || '').trim();
+
+    if (!Number.isFinite(noteId) || !noteText) {
+      return res.status(400).json({ message: 'noteId and noteText are required' });
+    }
+
+    const [rows]: any = await db.query(
+      'SELECT id FROM affiliate_special_notes WHERE id = ? AND user_id = ? LIMIT 1',
+      [noteId, userId]
+    );
+
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({ message: 'Note not found' });
+    }
+
+    await db.query(
+      'UPDATE affiliate_special_notes SET note_text = ? WHERE id = ? AND user_id = ?',
+      [noteText, noteId, userId]
+    );
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Special notes update error:', error);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+router.delete('/affiliate/special-notes/:noteId', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const noteId = Number(req.params.noteId);
+
+    if (!Number.isFinite(noteId)) {
+      return res.status(400).json({ message: 'Invalid noteId' });
+    }
+
+    await db.query('DELETE FROM affiliate_special_notes WHERE id = ? AND user_id = ?', [noteId, userId]);
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Special notes delete error:', error);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // Toggle pause state for a TikTok account
 router.post('/accounts/:accountId/toggle-pause', authenticateToken, async (req: AuthRequest, res) => {
   try {
@@ -646,6 +776,36 @@ router.post('/affiliate/start', async (req: any, res) => {
     if (!token) return res.status(401).json({ message: 'Authentication required' })
     const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret')
     const userId = decoded.userId
+
+    const [groupRows]: any = await db.query(
+      `SELECT g.id, g.name,
+              gp.ai_prompt, gp.example_dm, gp.example_comment,
+              gp.brand_voice, gp.affiliate_dm_prompt, gp.affiliate_invitation_text
+       FROM account_groups g
+       LEFT JOIN group_prompt_config gp
+         ON gp.user_id = g.user_id AND gp.group_id = g.id
+       WHERE g.user_id = ?`,
+      [userId]
+    );
+
+    const missingGroups = (groupRows || []).filter((g: any) => {
+      const required = [
+        g.ai_prompt,
+        g.example_dm,
+        g.example_comment,
+        g.brand_voice,
+        g.affiliate_dm_prompt,
+        g.affiliate_invitation_text
+      ];
+      return required.some((v: any) => !String(v || '').trim());
+    });
+
+    if (missingGroups.length > 0) {
+      const names = missingGroups.map((g: any) => g.name).join(', ');
+      return res.status(400).json({
+        message: `Cannot start affiliate mode. Missing Group prompts for: ${names}. Please complete Group settings first.`
+      });
+    }
 
     await setAffiliateRunning(userId, true)
     sendUserEvent(userId, { type: 'status', text: '🤝 Starting Affiliate Procurement...' })

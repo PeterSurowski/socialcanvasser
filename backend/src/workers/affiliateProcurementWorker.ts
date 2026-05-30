@@ -24,12 +24,35 @@ interface AffiliateRunState {
 
 interface AffiliateConfig {
   keywords: string[];
-  brandVoice: string;
-  invitationText: string;
   snoozeDays: number;
   keepInTouchSnoozeDays: number;
   openaiApiKey: string;
   dmEdsThreshold: number;
+  minAffiliateFollowers: number;
+}
+
+interface GroupPromptConfig {
+  aiPrompt: string;
+  exampleDM: string;
+  exampleComment: string;
+  brandVoice: string;
+  affiliateDmPrompt: string;
+  affiliateInvitationText: string;
+}
+
+interface AccountWithGroup {
+  id: number;
+  account_identifier: string;
+  browser_type: string;
+  incogniton_profile_id: string | null;
+  session_data: string | null;
+  actions_per_session: number;
+  current_session_actions: number;
+  is_rate_limited: number | boolean;
+  rate_limit_expires_at: string | null;
+  is_paused: number | boolean;
+  group_id: number | null;
+  group_name: string | null;
 }
 
 interface ProspectRow {
@@ -147,7 +170,7 @@ async function getAffiliateConfig(userId: number): Promise<AffiliateConfig | nul
   const connection = await db.getConnection();
   try {
     const [configRows] = await connection.query(
-      `SELECT keywords, brand_voice, affiliate_invitation_text, snooze_days, keep_in_touch_snooze_days, openai_api_key, affiliate_dm_eds_threshold
+      `SELECT keywords, snooze_days, keep_in_touch_snooze_days, openai_api_key, affiliate_dm_eds_threshold, min_affiliate_followers
        FROM user_config WHERE user_id = ? LIMIT 1`,
       [userId]
     );
@@ -162,31 +185,65 @@ async function getAffiliateConfig(userId: number): Promise<AffiliateConfig | nul
 
     return {
       keywords,
-      brandVoice: row.brand_voice || '',
-      invitationText: row.affiliate_invitation_text || '',
       snoozeDays: row.snooze_days ?? 3,
       keepInTouchSnoozeDays: row.keep_in_touch_snooze_days ?? 14,
       openaiApiKey: row.openai_api_key || '',
-      dmEdsThreshold: row.affiliate_dm_eds_threshold ?? 4
+      dmEdsThreshold: row.affiliate_dm_eds_threshold ?? 4,
+      minAffiliateFollowers: row.min_affiliate_followers ?? 2000
     };
   } finally {
     connection.release();
   }
 }
 
-async function getAvailableAccounts(userId: number): Promise<any[]> {
+async function getGroupPromptConfig(userId: number, groupId: number | null): Promise<GroupPromptConfig | null> {
+  if (!groupId) {
+    return null;
+  }
+
+  const connection = await db.getConnection();
+  try {
+    const [rows] = await connection.query(
+      `SELECT ai_prompt, example_dm, example_comment, brand_voice, affiliate_dm_prompt, affiliate_invitation_text
+       FROM group_prompt_config
+       WHERE user_id = ? AND group_id = ?
+       LIMIT 1`,
+      [userId, groupId]
+    );
+
+    const row = (rows as any[])[0];
+    if (!row) {
+      return null;
+    }
+
+    return {
+      aiPrompt: String(row.ai_prompt || ''),
+      exampleDM: String(row.example_dm || ''),
+      exampleComment: String(row.example_comment || ''),
+      brandVoice: String(row.brand_voice || ''),
+      affiliateDmPrompt: String(row.affiliate_dm_prompt || ''),
+      affiliateInvitationText: String(row.affiliate_invitation_text || '')
+    };
+  } finally {
+    connection.release();
+  }
+}
+
+async function getAvailableAccounts(userId: number): Promise<AccountWithGroup[]> {
   const connection = await db.getConnection();
   try {
     const [accountRows] = await connection.query(
-      `SELECT id, account_identifier, browser_type, incogniton_profile_id, session_data,
+      `SELECT ta.id, ta.account_identifier, ta.browser_type, ta.incogniton_profile_id, ta.session_data,
               actions_per_session, current_session_actions, is_rate_limited,
-              rate_limit_expires_at, is_paused
-       FROM tiktok_accounts
-       WHERE user_id = ? AND is_active = 1`,
+              rate_limit_expires_at, is_paused,
+              ta.group_id, ag.name AS group_name
+       FROM tiktok_accounts ta
+       LEFT JOIN account_groups ag ON ag.id = ta.group_id
+       WHERE ta.user_id = ? AND ta.is_active = 1`,
       [userId]
     );
 
-    return (accountRows as any[])
+    return (accountRows as AccountWithGroup[])
       .filter(a => {
         const snoozed =
           a.is_rate_limited &&
@@ -243,15 +300,52 @@ async function assignProspectToAccount(prospectId: number, accountId: number): P
   }
 }
 
+async function ensureGroupProspectAssignment(
+  userId: number,
+  groupId: number,
+  prospectId: number,
+  accountId: number
+): Promise<'assigned' | 'already_assigned_same_account' | 'assigned_other_account'> {
+  const connection = await db.getConnection();
+  try {
+    const [rows] = await connection.query(
+      `SELECT assigned_account_id
+       FROM affiliate_group_assignments
+       WHERE user_id = ? AND group_id = ? AND prospect_id = ?
+       LIMIT 1`,
+      [userId, groupId, prospectId]
+    );
+
+    const row = (rows as any[])[0];
+    if (row) {
+      if (Number(row.assigned_account_id) === accountId) {
+        return 'already_assigned_same_account';
+      }
+      return 'assigned_other_account';
+    }
+
+    await connection.query(
+      `INSERT INTO affiliate_group_assignments (user_id, group_id, prospect_id, assigned_account_id)
+       VALUES (?, ?, ?, ?)`,
+      [userId, groupId, prospectId, accountId]
+    );
+
+    return 'assigned';
+  } finally {
+    connection.release();
+  }
+}
+
 async function upsertProspectSeed(
   userId: number,
   username: string,
   profileUrl: string,
-  accountId: number
+  accountId: number,
+  groupId: number | null
 ): Promise<void> {
   const connection = await db.getConnection();
   try {
-    await connection.query(
+    const [result] = await connection.query(
       `INSERT INTO affiliate_prospects (user_id, tiktok_username, profile_url, incogniton_account_id)
        VALUES (?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
@@ -259,6 +353,29 @@ async function upsertProspectSeed(
          incogniton_account_id = COALESCE(incogniton_account_id, VALUES(incogniton_account_id))`,
       [userId, username, profileUrl, accountId]
     );
+
+    if (groupId) {
+      let prospectId: number | null = null;
+      const insertId = Number((result as any).insertId || 0);
+      if (insertId > 0) {
+        prospectId = insertId;
+      } else {
+        const [rows] = await connection.query(
+          'SELECT id FROM affiliate_prospects WHERE user_id = ? AND tiktok_username = ? LIMIT 1',
+          [userId, username]
+        );
+        prospectId = Number((rows as any[])[0]?.id || 0) || null;
+      }
+
+      if (prospectId) {
+        await connection.query(
+          `INSERT INTO affiliate_group_assignments (user_id, group_id, prospect_id, assigned_account_id)
+           VALUES (?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE assigned_account_id = assigned_account_id`,
+          [userId, groupId, prospectId, accountId]
+        );
+      }
+    }
   } finally {
     connection.release();
   }
@@ -728,7 +845,7 @@ async function getSearchVideoCandidates(page: Page, keyword: string): Promise<Se
       let loadedVideos = scrollInfo.initialCount;
       let scrollAttempts = 0;
       const maxScrollAttempts = 100;
-      const targetCreators = 200;
+      const targetCreators = 1000;
       let noChangeCount = 0;
 
       while (scrollAttempts < maxScrollAttempts) {
@@ -787,14 +904,14 @@ async function getSearchVideoCandidates(page: Page, keyword: string): Promise<Se
       .filter(Boolean);
 
     if (cardUrls.length > 0) {
-      return cardUrls.slice(0, 500);
+      return cardUrls.slice(0, 1000);
     }
 
     const fallback = Array.from(document.querySelectorAll('a[href*="/video/"]')) as HTMLAnchorElement[];
     return fallback
       .map(link => link.getAttribute('href') || '')
       .filter(Boolean)
-      .slice(0, 500);
+      .slice(0, 1000);
   });
 
   const seenUrl = new Set<string>();
@@ -913,6 +1030,7 @@ async function seedProspectsFromKeyword(
   page: Page,
   userId: number,
   accountId: number,
+  groupId: number | null,
   keywords: string[],
   keywordIndexRef: { value: number }
 ): Promise<number> {
@@ -938,7 +1056,7 @@ async function seedProspectsFromKeyword(
 
   let seeded = 0;
   for (const candidate of candidates) {
-    await upsertProspectSeed(userId, candidate.creatorUsername, candidate.profileUrl, accountId);
+    await upsertProspectSeed(userId, candidate.creatorUsername, candidate.profileUrl, accountId, groupId);
     seeded++;
   }
 
@@ -1122,7 +1240,8 @@ async function processNotificationsAndScore(
 
 async function findNextEligibleProspect(
   userId: number,
-  accountId: number
+  accountId: number,
+  groupId: number | null
 ): Promise<ProspectRow | null> {
   const prospects = await getProspectsOrdered(userId);
   const now = new Date();
@@ -1136,7 +1255,16 @@ async function findNextEligibleProspect(
       continue;
     }
 
-    if (prospect.incogniton_account_id && prospect.incogniton_account_id !== accountId) {
+    if (prospect.incogniton_account_id && prospect.incogniton_account_id !== accountId && !groupId) {
+      continue;
+    }
+
+    if (groupId) {
+      const assignmentState = await ensureGroupProspectAssignment(userId, groupId, prospect.id, accountId);
+      if (assignmentState === 'assigned_other_account') {
+        continue;
+      }
+    } else if (prospect.incogniton_account_id && prospect.incogniton_account_id !== accountId) {
       continue;
     }
 
@@ -1149,11 +1277,19 @@ async function findNextEligibleProspect(
 async function processProspect(
   page: Page,
   userId: number,
-  account: any,
+  account: AccountWithGroup,
   config: AffiliateConfig,
+  groupConfig: GroupPromptConfig,
   prospectInput: ProspectRow
 ): Promise<boolean> {
   let prospect = prospectInput;
+
+  if (account.group_id) {
+    const assignment = await ensureGroupProspectAssignment(userId, account.group_id, prospect.id, account.id);
+    if (assignment === 'assigned_other_account') {
+      return false;
+    }
+  }
 
   if (!prospect.incogniton_account_id) {
     await assignProspectToAccount(prospect.id, account.id);
@@ -1249,7 +1385,7 @@ async function processProspect(
         generatedComment = await generateAffiliateComment(
           caption,
           comments,
-          config.brandVoice,
+          groupConfig.brandVoice,
           config.openaiApiKey
         );
       } catch (error) {
@@ -1314,12 +1450,12 @@ async function processProspect(
   const currentEds = refreshedProspect?.engagement_depth_score ?? 0;
   const keepInTouch = refreshedProspect ? asBool(refreshedProspect.is_keep_in_touch) : false;
 
-  if (!keepInTouch && !dmSent && currentEds >= config.dmEdsThreshold && config.invitationText?.trim() && Math.random() < 0.5) {
+  if (!keepInTouch && !dmSent && currentEds >= config.dmEdsThreshold && groupConfig.affiliateInvitationText?.trim() && Math.random() < 0.5) {
     const alreadyContacted = await hasContactedUser(userId, canonicalUsername);
     if (!alreadyContacted) {
       const context = await getRecentContextForProspect(userId, canonicalUsername);
 
-      let dmText = config.invitationText;
+      let dmText = groupConfig.affiliateInvitationText;
       try {
         const generatedDm = await generateAffiliateProspectDM(
           canonicalUsername,
@@ -1327,8 +1463,8 @@ async function processProspect(
           refreshedProspect?.bio_text || '',
           context.captions,
           context.comments,
-          config.invitationText,
-          config.brandVoice,
+          groupConfig.affiliateDmPrompt || groupConfig.affiliateInvitationText,
+          groupConfig.brandVoice,
           config.openaiApiKey
         );
 
@@ -1404,6 +1540,15 @@ export async function runAffiliateProcurementForAccounts(userId: number): Promis
     const account = accounts[accountCursor % accounts.length];
     accountCursor += 1;
 
+    const groupConfig = await getGroupPromptConfig(userId, account.group_id);
+    if (!groupConfig) {
+      sendUserEvent(userId, {
+        type: 'error',
+        text: `❌ Affiliate: missing Group prompt config for @${account.account_identifier} (${account.group_name || 'unassigned group'})`
+      });
+      continue;
+    }
+
     let browserConnection: BrowserConnection | null = null;
     let sessionCount = 0;
 
@@ -1435,13 +1580,14 @@ export async function runAffiliateProcurementForAccounts(userId: number): Promis
       await processNotificationsAndScore(page, userId);
 
       while ((await isAffiliateAutomationRunning(userId)) && sessionCount < maxUsersPerSession) {
-        let prospect = await findNextEligibleProspect(userId, account.id);
+        let prospect = await findNextEligibleProspect(userId, account.id, account.group_id);
 
         if (!prospect) {
           const seeded = await seedProspectsFromKeyword(
             page,
             userId,
             account.id,
+            account.group_id,
             config.keywords,
             keywordIndexRef
           );
@@ -1451,14 +1597,14 @@ export async function runAffiliateProcurementForAccounts(userId: number): Promis
             break;
           }
 
-          prospect = await findNextEligibleProspect(userId, account.id);
+          prospect = await findNextEligibleProspect(userId, account.id, account.group_id);
           if (!prospect) {
             await delay(1000);
             continue;
           }
         }
 
-        const processed = await processProspect(page, userId, account, config, prospect);
+        const processed = await processProspect(page, userId, account, config, groupConfig, prospect);
         if (processed) {
           sessionCount += 1;
         }

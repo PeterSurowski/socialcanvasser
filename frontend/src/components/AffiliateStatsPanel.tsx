@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 
 interface Account {
   id: number;
@@ -31,6 +32,14 @@ interface IgnoreListUser {
   profile_url: string;
 }
 
+interface SpecialNote {
+  id: number;
+  tiktok_username: string;
+  note_text: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export default function AffiliateStatsPanel({
   accounts,
   onRefreshAccounts
@@ -38,6 +47,7 @@ export default function AffiliateStatsPanel({
   accounts: Account[];
   onRefreshAccounts?: () => void;
 }) {
+  const navigate = useNavigate()
   const [activeTab, setActiveTab] = useState<'overall' | number>('overall')
   const [startDate, setStartDate] = useState(() => {
     const date = new Date()
@@ -59,6 +69,12 @@ export default function AffiliateStatsPanel({
   const [ignoreListSaving, setIgnoreListSaving] = useState(false)
   const [ignoreListMessage, setIgnoreListMessage] = useState<string | null>(null)
   const [removingIgnoreIds, setRemovingIgnoreIds] = useState<number[]>([])
+  const [specialNotes, setSpecialNotes] = useState<SpecialNote[]>([])
+  const [specialNotesLoading, setSpecialNotesLoading] = useState(false)
+  const [specialNotesSaving, setSpecialNotesSaving] = useState(false)
+  const [specialNotesMessage, setSpecialNotesMessage] = useState<string | null>(null)
+  const [specialNotesUsername, setSpecialNotesUsername] = useState('')
+  const [specialNotesText, setSpecialNotesText] = useState('')
 
   useEffect(() => {
     fetchStats()
@@ -67,7 +83,20 @@ export default function AffiliateStatsPanel({
   useEffect(() => {
     fetchKeepInTouchUsers()
     fetchIgnoreListUsers()
+    fetchSpecialNotes()
   }, [activeTab, accounts])
+
+  const specialNoteUsernames = useMemo(() => {
+    const seen = new Set<string>()
+    const output: string[] = []
+    for (const note of specialNotes) {
+      const key = String(note.tiktok_username || '').toLowerCase()
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      output.push(note.tiktok_username)
+    }
+    return output
+  }, [specialNotes])
 
   const fetchStats = async () => {
     setLoading(true)
@@ -308,6 +337,66 @@ export default function AffiliateStatsPanel({
     }
   }
 
+  const fetchSpecialNotes = async () => {
+    setSpecialNotesLoading(true)
+    const token = localStorage.getItem('token')
+
+    try {
+      const res = await fetch('/api/dashboard/affiliate/special-notes', {
+        headers: { Authorization: `Bearer ${token}` }
+      })
+
+      if (res.ok) {
+        const data = await res.json()
+        setSpecialNotes(data.notes || [])
+      } else {
+        setSpecialNotes([])
+      }
+    } catch (error) {
+      console.error('Error fetching Special Notes:', error)
+      setSpecialNotes([])
+    } finally {
+      setSpecialNotesLoading(false)
+    }
+  }
+
+  const handleAddSpecialNote = async () => {
+    const username = specialNotesUsername.trim().replace(/^@/, '')
+    const noteText = specialNotesText.trim()
+    if (!username || !noteText) return
+
+    setSpecialNotesSaving(true)
+    setSpecialNotesMessage(null)
+
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch('/api/dashboard/affiliate/special-notes', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ username, noteText })
+      })
+
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setSpecialNotesMessage(data?.message || 'Failed to save special note')
+        return
+      }
+
+      setSpecialNotesUsername('')
+      setSpecialNotesText('')
+      setSpecialNotesMessage(`Saved special note for @${data?.username || username}`)
+      await fetchSpecialNotes()
+    } catch (error) {
+      console.error('Error saving special note:', error)
+      setSpecialNotesMessage('Failed to save special note')
+    } finally {
+      setSpecialNotesSaving(false)
+    }
+  }
+
   const currentStats: AffiliateAccountStats = activeTab === 'overall'
     ? stats.overall || {
         prospects_in_pipeline: 0,
@@ -492,6 +581,44 @@ export default function AffiliateStatsPanel({
                   <div className="text-xs text-red-800">{ignoreListMessage}</div>
                 )}
               </div>
+
+              <div className="bg-green-50 rounded-lg p-4 border border-green-200 space-y-3">
+                <div className="text-sm font-semibold text-green-900">Special Notes</div>
+                <div className="text-xs text-green-700">
+                  Add special notes about your personal interactions with TikTok users so our AI can better customize its messages to them.
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="px-3 py-2 rounded-lg bg-white border border-gray-300 text-sm text-gray-700 whitespace-nowrap">
+                    https://tiktok.com/@
+                  </span>
+                  <input
+                    type="text"
+                    value={specialNotesUsername}
+                    onChange={(e) => setSpecialNotesUsername(e.target.value)}
+                    placeholder="username"
+                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg"
+                  />
+                </div>
+                <textarea
+                  value={specialNotesText}
+                  onChange={(e) => setSpecialNotesText(e.target.value)}
+                  placeholder="Add your note here..."
+                  rows={3}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                />
+                <div className="flex justify-end">
+                  <button
+                    onClick={handleAddSpecialNote}
+                    disabled={specialNotesSaving || !specialNotesUsername.trim() || !specialNotesText.trim()}
+                    className="px-4 py-2 rounded-lg bg-green-600 hover:bg-green-700 text-white font-medium disabled:opacity-50"
+                  >
+                    {specialNotesSaving ? 'Saving...' : 'Save'}
+                  </button>
+                </div>
+                {specialNotesMessage && (
+                  <div className="text-xs text-green-800">{specialNotesMessage}</div>
+                )}
+              </div>
             </div>
           )}
 
@@ -570,6 +697,27 @@ export default function AffiliateStatsPanel({
                       {removingIgnoreIds.includes(user.id) ? 'Removing...' : 'Remove'}
                     </button>
                   </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+            <div className="text-sm font-semibold text-gray-800 mb-2">Special Notes users</div>
+            {specialNotesLoading ? (
+              <div className="text-sm text-gray-500">Loading Special Notes...</div>
+            ) : specialNoteUsernames.length === 0 ? (
+              <div className="text-sm text-gray-500">No users with Special Notes yet.</div>
+            ) : (
+              <div className="space-y-2">
+                {specialNoteUsernames.map((username) => (
+                  <button
+                    key={username}
+                    onClick={() => navigate(`/dashboard/special-notes/${encodeURIComponent(username)}`)}
+                    className="w-full text-left px-3 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-100 text-sm font-medium text-blue-700"
+                  >
+                    @{username}
+                  </button>
                 ))}
               </div>
             )}
