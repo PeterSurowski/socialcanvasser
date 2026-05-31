@@ -450,6 +450,7 @@ export async function searchTikTokByKeywords(
   keywordIndex: number = 0,
   userId?: number,
   userConfig?: any,
+  getUserConfigForAccount?: (account: any) => Promise<any | null>,
   getBrowserContextForAccount?: (account: any) => Promise<{ context: any, page: any }>,
   existingPage?: any,
   checkpoint?: AutomationCheckpoint | null,
@@ -463,7 +464,7 @@ export async function searchTikTokByKeywords(
     
     // Get account info (including browser type and profile)
     const [rows] = await connection.query(
-      'SELECT id, account_identifier, browser_type, incogniton_profile_id, session_data FROM tiktok_accounts WHERE id = ? AND is_active = 1 LIMIT 1',
+      'SELECT id, account_identifier, browser_type, incogniton_profile_id, session_data, group_id FROM tiktok_accounts WHERE id = ? AND is_active = 1 LIMIT 1',
       [accountId]
     );
     
@@ -503,7 +504,14 @@ export async function searchTikTokByKeywords(
     
     console.log(`[TikTok Search] Searching for keyword: "${keyword}" (index ${keywordIndex}/${keywords.length - 1})`);
     
-    const shouldResume = !!(checkpoint && checkpoint.accountId === accountId && checkpoint.keywordIndex === keywordIndex);
+    const accountGroupId = Number((account as any).group_id || 0);
+    const checkpointGroupId = Number(checkpoint?.groupId || 0);
+    const isCheckpointGroupMatch = !!(checkpointGroupId && accountGroupId && checkpointGroupId === accountGroupId);
+    const shouldResume = !!(
+      checkpoint &&
+      checkpoint.keywordIndex === keywordIndex &&
+      (checkpoint.accountId === accountId || isCheckpointGroupMatch)
+    );
     const resumeVideoIndex = shouldResume ? (checkpoint?.videoIndex ?? 0) : 0;
     const resumeVideoUrl = shouldResume ? (checkpoint?.videoUrl ?? null) : null;
     const resumeStage = shouldResume ? (checkpoint?.stage ?? null) : null;
@@ -1501,13 +1509,36 @@ export async function searchTikTokByKeywords(
             if (userId && userConfig && filteredComments.length > 0) {
               try {
                 console.log(`[TikTok Search] Analyzing ${filteredComments.length} comments for buying intent...`);
+                let activeUserConfig = userConfig;
                 
                 // Send to OpenAI for buying intent analysis
-                const buyingIntentResults = await analyzeCommentsForBuyingIntent(
+                let buyingIntentResults = await analyzeCommentsForBuyingIntent(
                   filteredComments,
                   videoData.post.videoUrl,
-                  userConfig
+                  activeUserConfig
                 );
+                let analysisAccountId = currentAccountId;
+
+                const reloadAnalysisForCurrentAccount = async (accountForConfig: any): Promise<boolean> => {
+                  if (!getUserConfigForAccount) {
+                    return true;
+                  }
+
+                  const refreshedUserConfig = await getUserConfigForAccount(accountForConfig);
+                  if (!refreshedUserConfig) {
+                    return false;
+                  }
+
+                  activeUserConfig = refreshedUserConfig;
+                  console.log(`[TikTok Search] Re-analyzing comments with Group prompts for account ${currentAccountId}`);
+                  buyingIntentResults = await analyzeCommentsForBuyingIntent(
+                    filteredComments,
+                    videoData.post.videoUrl,
+                    activeUserConfig
+                  );
+                  analysisAccountId = currentAccountId;
+                  return true;
+                };
                 
                 acceptedCount = buyingIntentResults.filter(r => r.hasBuyingIntent).length;
                 rejectedCount = filteredComments.length - acceptedCount;
@@ -1535,7 +1566,14 @@ export async function searchTikTokByKeywords(
                     console.log('[TikTok Search] Automation stopped - exiting engagement loop');
                     return { posts, nextKeywordIndex };
                   }
-                  const result = buyingIntentResults[engagementIndex];
+                  if (analysisAccountId !== currentAccountId) {
+                    const reanalysisSucceeded = await reloadAnalysisForCurrentAccount(currentAccountId);
+                    if (!reanalysisSucceeded) {
+                      return { posts, nextKeywordIndex };
+                    }
+                  }
+
+                  let result = buyingIntentResults[engagementIndex];
                   if (engagementIndex < engagementStartIndex) {
                     continue;
                   }
@@ -1622,6 +1660,16 @@ export async function searchTikTokByKeywords(
                         }
                         
                         // Retry engagement with new account
+                        const reanalysisSucceeded = await reloadAnalysisForCurrentAccount(nextAccount);
+                        if (!reanalysisSucceeded) {
+                          return { posts, nextKeywordIndex };
+                        }
+                        result = buyingIntentResults[engagementIndex];
+                        if (!result?.hasBuyingIntent || !result.customizedDM || !result.customizedReply) {
+                          console.log(`[TikTok Search] Skipping @${result?.username || 'unknown'} after account switch due to updated analysis`);
+                          continue;
+                        }
+
                         console.log(`[Account Rotation] 🔁 Retrying engagement with new account...`);
                         engagementResult = await engageWithUser(
                           page,
@@ -1867,7 +1915,7 @@ export async function searchTikTokByKeywords(
 /**
  * PHASE 3: Get next available (non-snoozed) account for rotation
  */
-async function getNextAvailableAccount(userId: number, currentAccountId: number): Promise<any | null> {
+async function getNextAvailableAccount(userId: number, currentAccountId: number, preferredGroupId: number | null = null): Promise<any | null> {
   const connection = await db.getConnection();
   try {
     // Query for next available account:
@@ -1886,10 +1934,11 @@ async function getNextAvailableAccount(userId: number, currentAccountId: number)
          AND (is_rate_limited = FALSE OR rate_limit_expires_at IS NULL OR rate_limit_expires_at < NOW())
        ORDER BY 
          CASE WHEN id = ? THEN 0 ELSE 1 END DESC,  -- Prefer different account (1=different comes first with DESC)
+         CASE WHEN group_id = ? THEN 1 ELSE 0 END DESC,  -- Prefer checkpoint Group when resuming
          last_used_at ASC,  -- Least recently used first
          id ASC
        LIMIT 1`,
-      [userId, currentAccountId]
+      [userId, currentAccountId, preferredGroupId ?? -1]
     );
     
     if (!accounts || (accounts as any[]).length === 0) {
@@ -1994,6 +2043,7 @@ async function resetActionCounter(accountId: number): Promise<void> {
 
 type AutomationCheckpoint = {
   accountId: number | null;
+  groupId: number | null;
   keywordIndex: number | null;
   videoIndex: number | null;
   videoUrl: string | null;
@@ -2008,7 +2058,8 @@ async function getAutomationCheckpoint(userId: number): Promise<AutomationCheckp
     const [rows] = await connection.query(
       `SELECT checkpoint_account_id, checkpoint_keyword_index, checkpoint_video_index,
               checkpoint_video_url, checkpoint_stage, checkpoint_engagement_index,
-              checkpoint_engagement_username
+              checkpoint_engagement_username,
+              (SELECT ta.group_id FROM tiktok_accounts ta WHERE ta.id = automation_state.checkpoint_account_id LIMIT 1) AS checkpoint_group_id
        FROM automation_state
        WHERE user_id = ?
        LIMIT 1`,
@@ -2022,6 +2073,7 @@ async function getAutomationCheckpoint(userId: number): Promise<AutomationCheckp
 
     return {
       accountId: row.checkpoint_account_id ?? null,
+      groupId: row.checkpoint_group_id ?? null,
       keywordIndex: row.checkpoint_keyword_index ?? null,
       videoIndex: row.checkpoint_video_index ?? null,
       videoUrl: row.checkpoint_video_url ?? null,
@@ -2191,6 +2243,72 @@ export async function runTikTokSearchForAccounts(userId: number) {
     
     const baseCreatorMessage = configData.creator_message;
     const openaiApiKey = configData.openai_api_key;
+
+    const getUserConfigForAccount = async (accountForConfig: any): Promise<any | null> => {
+      const accountIdForConfig = typeof accountForConfig === 'number'
+        ? accountForConfig
+        : Number(accountForConfig?.id || 0);
+
+      if (!accountIdForConfig) {
+        return null;
+      }
+
+      const [accountRowsForConfig] = await connection.query(
+        `SELECT id, account_identifier, group_id
+         FROM tiktok_accounts
+         WHERE id = ? AND user_id = ? AND is_active = 1
+         LIMIT 1`,
+        [accountIdForConfig, userId]
+      );
+
+      const accountForConfigRow = (accountRowsForConfig as any[])[0];
+      if (!accountForConfigRow) {
+        return null;
+      }
+
+      const groupId = Number(accountForConfigRow.group_id || 0);
+      if (!groupId) {
+        sendUserEvent(userId, {
+          type: 'error',
+          text: `❌ @${accountForConfigRow.account_identifier} has no Group assigned. Assign a Group in settings before running.`
+        });
+        return null;
+      }
+
+      const [groupConfigRows] = await connection.query(
+        `SELECT ai_prompt, example_dm, example_comment, brand_voice, affiliate_dm_prompt, affiliate_invitation_text
+         FROM group_prompt_config
+         WHERE user_id = ? AND group_id = ?
+         LIMIT 1`,
+        [userId, groupId]
+      );
+
+      const groupConfig = (groupConfigRows as any[])[0] || null;
+      const requiredPrompts = [
+        groupConfig?.ai_prompt,
+        groupConfig?.example_dm,
+        groupConfig?.example_comment,
+        groupConfig?.brand_voice,
+        groupConfig?.affiliate_dm_prompt,
+        groupConfig?.affiliate_invitation_text
+      ];
+
+      if (requiredPrompts.some((p: any) => !String(p || '').trim())) {
+        sendUserEvent(userId, {
+          type: 'error',
+          text: `❌ Missing Group prompts for @${accountForConfigRow.account_identifier}. Complete Group settings before running.`
+        });
+        return null;
+      }
+
+      return {
+        aiPrompt: groupConfig.ai_prompt,
+        creatorMessage: baseCreatorMessage,
+        exampleDM: groupConfig.example_dm,
+        exampleComment: groupConfig.example_comment,
+        openaiApiKey
+      };
+    };
     
     console.log(`[TikTok Search Worker] Keywords configured: ${keywords.join(', ')}`);
     console.log(`[TikTok Search Worker] PHASE 3: Multi-account rotation enabled`);
@@ -2198,6 +2316,7 @@ export async function runTikTokSearchForAccounts(userId: number) {
     
     // Load resume checkpoint (if any)
     const checkpoint = await getAutomationCheckpoint(userId);
+    const preferredResumeGroupId = Number(checkpoint?.groupId || 0) || null;
     
     // PHASE 3: Start with checkpoint account if available, otherwise first available account
     let currentAccount: any = null;
@@ -2224,7 +2343,7 @@ export async function runTikTokSearchForAccounts(userId: number) {
     }
     
     if (!currentAccount) {
-      currentAccount = await getNextAvailableAccount(userId, -1);
+      currentAccount = await getNextAvailableAccount(userId, -1, preferredResumeGroupId);
     }
     
     if (!currentAccount) {
@@ -2290,46 +2409,18 @@ export async function runTikTokSearchForAccounts(userId: number) {
         
         // NOTE: searchTikTokByKeywords will use the existing page and handle engagements with account rotation
         // The page variable may be reassigned during engagement if rotation occurs
-        const keywordIndexToUse = (checkpoint && checkpoint.accountId === currentAccountId && checkpoint.keywordIndex !== null)
+        const checkpointGroupMatchesCurrent = Number(checkpoint?.groupId || 0) > 0 && Number(currentAccount.group_id || 0) > 0 && Number(checkpoint?.groupId || 0) === Number(currentAccount.group_id || 0);
+        const keywordIndexToUse = (checkpoint && checkpoint.keywordIndex !== null && (checkpoint.accountId === currentAccountId || checkpointGroupMatchesCurrent))
           ? checkpoint.keywordIndex
           : (currentAccount.last_keyword_index || 0);
 
-        const [groupConfigRows] = await connection.query(
-          `SELECT ai_prompt, example_dm, example_comment, brand_voice, affiliate_dm_prompt, affiliate_invitation_text
-           FROM group_prompt_config
-           WHERE user_id = ? AND group_id = ?
-           LIMIT 1`,
-          [userId, currentAccount.group_id || 0]
-        );
-
-        const groupConfig = (groupConfigRows as any[])[0] || null;
-        const requiredPrompts = [
-          groupConfig?.ai_prompt,
-          groupConfig?.example_dm,
-          groupConfig?.example_comment,
-          groupConfig?.brand_voice,
-          groupConfig?.affiliate_dm_prompt,
-          groupConfig?.affiliate_invitation_text
-        ];
-
-        if (requiredPrompts.some((p: any) => !String(p || '').trim())) {
-          sendUserEvent(userId, {
-            type: 'error',
-            text: `❌ Missing Group prompts for @${currentAccount.account_identifier}. Complete Group settings before running.`
-          });
+        const userConfig = await getUserConfigForAccount(currentAccount);
+        if (!userConfig) {
           await closeBrowserConnection(browserConnection);
           browserConnection = null;
           currentAccount = await getNextAvailableAccount(userId, currentAccount.id);
           continue;
         }
-
-        const userConfig = {
-          aiPrompt: groupConfig.ai_prompt,
-          creatorMessage: baseCreatorMessage,
-          exampleDM: groupConfig.example_dm,
-          exampleComment: groupConfig.example_comment,
-          openaiApiKey
-        };
       
         const result = await searchTikTokByKeywords(
           currentAccountId,
@@ -2337,6 +2428,7 @@ export async function runTikTokSearchForAccounts(userId: number) {
           keywordIndexToUse,
           userId,
           userConfig,
+          getUserConfigForAccount,
           getBrowserContextForAccount,
           page,
           checkpoint,
