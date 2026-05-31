@@ -1878,7 +1878,7 @@ async function getNextAvailableAccount(userId: number, currentAccountId: number)
     // 5. Preferably a different account than current (for rotation)
     const [accounts] = await connection.query(
       `SELECT id, account_identifier, session_data, actions_per_session, current_session_actions, 
-              is_rate_limited, rate_limit_expires_at, last_keyword_index
+              is_rate_limited, rate_limit_expires_at, last_keyword_index, group_id
        FROM tiktok_accounts 
        WHERE user_id = ? 
          AND is_active = 1 
@@ -2132,7 +2132,7 @@ export async function runTikTokSearchForAccounts(userId: number) {
     // Get user's active TikTok accounts (including rate limit status)
     const [accounts] = await connection.query(
       `SELECT id, account_identifier, session_data, actions_per_session, current_session_actions,
-              is_rate_limited, rate_limit_expires_at, last_keyword_index
+              is_rate_limited, rate_limit_expires_at, last_keyword_index, group_id
        FROM tiktok_accounts 
        WHERE user_id = ? AND is_active = 1`,
       [userId]
@@ -2171,7 +2171,7 @@ export async function runTikTokSearchForAccounts(userId: number) {
     
     // Get user's keywords from config
     const [configRows] = await connection.query(
-      'SELECT keywords, ai_prompt, creator_message, example_dm, example_comment, openai_api_key FROM user_config WHERE user_id = ?',
+      'SELECT keywords, creator_message, openai_api_key FROM user_config WHERE user_id = ?',
       [userId]
     );
     
@@ -2189,14 +2189,8 @@ export async function runTikTokSearchForAccounts(userId: number) {
       return;
     }
     
-    // Prepare user config for OpenAI
-    const userConfig = {
-      aiPrompt: configData.ai_prompt,
-      creatorMessage: configData.creator_message,
-      exampleDM: configData.example_dm,
-      exampleComment: configData.example_comment,
-      openaiApiKey: configData.openai_api_key
-    };
+    const baseCreatorMessage = configData.creator_message;
+    const openaiApiKey = configData.openai_api_key;
     
     console.log(`[TikTok Search Worker] Keywords configured: ${keywords.join(', ')}`);
     console.log(`[TikTok Search Worker] PHASE 3: Multi-account rotation enabled`);
@@ -2210,7 +2204,7 @@ export async function runTikTokSearchForAccounts(userId: number) {
     if (checkpoint?.accountId) {
       const [checkpointAccountRows] = await connection.query(
         `SELECT id, account_identifier, session_data, actions_per_session, current_session_actions,
-                is_rate_limited, rate_limit_expires_at, is_paused, last_keyword_index
+                is_rate_limited, rate_limit_expires_at, is_paused, last_keyword_index, group_id
          FROM tiktok_accounts
          WHERE id = ? AND user_id = ? AND is_active = 1
          LIMIT 1`,
@@ -2299,6 +2293,43 @@ export async function runTikTokSearchForAccounts(userId: number) {
         const keywordIndexToUse = (checkpoint && checkpoint.accountId === currentAccountId && checkpoint.keywordIndex !== null)
           ? checkpoint.keywordIndex
           : (currentAccount.last_keyword_index || 0);
+
+        const [groupConfigRows] = await connection.query(
+          `SELECT ai_prompt, example_dm, example_comment, brand_voice, affiliate_dm_prompt, affiliate_invitation_text
+           FROM group_prompt_config
+           WHERE user_id = ? AND group_id = ?
+           LIMIT 1`,
+          [userId, currentAccount.group_id || 0]
+        );
+
+        const groupConfig = (groupConfigRows as any[])[0] || null;
+        const requiredPrompts = [
+          groupConfig?.ai_prompt,
+          groupConfig?.example_dm,
+          groupConfig?.example_comment,
+          groupConfig?.brand_voice,
+          groupConfig?.affiliate_dm_prompt,
+          groupConfig?.affiliate_invitation_text
+        ];
+
+        if (requiredPrompts.some((p: any) => !String(p || '').trim())) {
+          sendUserEvent(userId, {
+            type: 'error',
+            text: `❌ Missing Group prompts for @${currentAccount.account_identifier}. Complete Group settings before running.`
+          });
+          await closeBrowserConnection(browserConnection);
+          browserConnection = null;
+          currentAccount = await getNextAvailableAccount(userId, currentAccount.id);
+          continue;
+        }
+
+        const userConfig = {
+          aiPrompt: groupConfig.ai_prompt,
+          creatorMessage: baseCreatorMessage,
+          exampleDM: groupConfig.example_dm,
+          exampleComment: groupConfig.example_comment,
+          openaiApiKey
+        };
       
         const result = await searchTikTokByKeywords(
           currentAccountId,

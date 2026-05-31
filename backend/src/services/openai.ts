@@ -277,3 +277,76 @@ Write one personalized DM now.`;
     throw error;
   }
 }
+
+interface StatusUnknownClassificationInput {
+  username: string;
+  userTitle: string;
+  bioText: string;
+  firstVideoCaption: string;
+  firstVideoComments: string[];
+  externalHtml: string;
+  openaiApiKey: string;
+}
+
+interface StatusUnknownClassificationResult {
+  qualifiesAsAffiliate: boolean;
+  reasoning: string;
+}
+
+export async function classifyStatusUnknownProspect(
+  input: StatusUnknownClassificationInput
+): Promise<StatusUnknownClassificationResult> {
+  const openai = new OpenAI({ apiKey: input.openaiApiKey });
+
+  const systemPrompt = `You classify TikTok users for an affiliate outreach system.
+
+Classify as qualifiesAsAffiliate=true when ANY are true:
+- They sell peptides directly
+- They sell products peptides complement (beauty, health, fitness)
+- They create beauty, health, or fitness content consistently
+
+If none apply, qualifiesAsAffiliate=false.
+
+Return strict JSON only with keys:
+- qualifiesAsAffiliate (boolean)
+- reasoning (short string)`;
+
+  const userPrompt = `Username: @${input.username}
+User title: ${input.userTitle || '(none)'}
+Bio text: ${input.bioText || '(none)'}
+
+First video caption:
+${input.firstVideoCaption || '(none)'}
+
+First video comments:
+${(input.firstVideoComments || []).slice(0, 10).map((c, i) => `${i + 1}. ${c}`).join('\n') || '(none)'}
+
+External page HTML (truncated to <=25,000 chars):
+${(input.externalHtml || '').slice(0, 25000) || '(none)'}
+
+Answer in JSON only.`;
+
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ],
+    temperature: 0.2,
+    response_format: { type: 'json_object' }
+  });
+
+  const raw = completion.choices[0].message.content || '{}';
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      qualifiesAsAffiliate: Boolean(parsed?.qualifiesAsAffiliate),
+      reasoning: String(parsed?.reasoning || '')
+    };
+  } catch {
+    return {
+      qualifiesAsAffiliate: false,
+      reasoning: 'Unable to parse model output'
+    };
+  }
+}

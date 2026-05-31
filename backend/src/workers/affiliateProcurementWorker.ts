@@ -1,6 +1,8 @@
 import db from '../config/database.js';
 import { sendUserEvent } from '../events/broadcaster.js';
 import {
+  analyzeCommentsForBuyingIntent,
+  classifyStatusUnknownProspect,
   generateAffiliateComment,
   generateAffiliateProspectDM
 } from '../services/openai.js';
@@ -64,6 +66,8 @@ interface ProspectRow {
   engagement_depth_score: number;
   interaction_sessions: number;
   bio_scraped: number | boolean;
+  follower_count: number | null;
+  prospect_type: ProspectType | null;
   bio_text: string | null;
   user_title: string | null;
   is_following: number | boolean;
@@ -72,6 +76,15 @@ interface ProspectRow {
   is_ignore_list: number | boolean;
   snoozed_until: string | null;
   dm_sent: number | boolean;
+}
+
+type ProspectType = 'prospective_affiliate' | 'prospective_customer' | 'status_unknown' | 'disqualified';
+
+interface ScrapedComment {
+  username: string;
+  text: string;
+  relativeTime: string;
+  profileUrl: string;
 }
 
 interface SearchVideoCandidate {
@@ -99,6 +112,54 @@ function normalizeTikTokUrl(href: string): string {
 function extractUsernameFromTikTokUrl(url: string): string | null {
   const match = url.match(/\/@([^/?]+)/);
   return match?.[1] || null;
+}
+
+function parseFollowerCount(raw: string | null | undefined): number | null {
+  if (!raw) return null;
+
+  const text = String(raw).trim().toUpperCase().replace(/,/g, '');
+  const match = text.match(/([0-9]*\.?[0-9]+)\s*([KMB])?/);
+  if (!match) return null;
+
+  const base = Number(match[1]);
+  if (!Number.isFinite(base)) return null;
+
+  const suffix = match[2] || '';
+  const multiplier = suffix === 'K' ? 1_000 : suffix === 'M' ? 1_000_000 : suffix === 'B' ? 1_000_000_000 : 1;
+  return Math.round(base * multiplier);
+}
+
+function parseRelativeTimeToDays(relativeTime: string): number {
+  const text = String(relativeTime || '').trim().toLowerCase();
+  if (!text) return Number.POSITIVE_INFINITY;
+
+  if (text.includes('just now') || text.includes('sec') || text.includes('s')) {
+    return 0;
+  }
+
+  const m = text.match(/(\d+)\s*(m|min|mins|minute|minutes)\b/);
+  if (m) return Number(m[1]) / (60 * 24);
+
+  const h = text.match(/(\d+)\s*(h|hr|hrs|hour|hours)\b/);
+  if (h) return Number(h[1]) / 24;
+
+  const d = text.match(/(\d+)\s*(d|day|days)\b/);
+  if (d) return Number(d[1]);
+
+  const w = text.match(/(\d+)\s*(w|wk|week|weeks)\b/);
+  if (w) return Number(w[1]) * 7;
+
+  const mo = text.match(/(\d+)\s*(mo|month|months)\b/);
+  if (mo) return Number(mo[1]) * 30;
+
+  const y = text.match(/(\d+)\s*(y|yr|year|years)\b/);
+  if (y) return Number(y[1]) * 365;
+
+  return Number.POSITIVE_INFINITY;
+}
+
+function isCommentRecentWithin7Days(relativeTime: string): boolean {
+  return parseRelativeTimeToDays(relativeTime) <= 7;
 }
 
 async function isAffiliateAutomationRunning(userId: number): Promise<boolean> {
@@ -281,6 +342,57 @@ async function getProspectById(prospectId: number): Promise<ProspectRow | null> 
       [prospectId]
     );
     return ((rows as any[])[0] as ProspectRow) || null;
+  } finally {
+    connection.release();
+  }
+}
+
+async function getStatusUnknownProspects(userId: number): Promise<ProspectRow[]> {
+  const connection = await db.getConnection();
+  try {
+    const [rows] = await connection.query(
+      `SELECT * FROM affiliate_prospects
+       WHERE user_id = ? AND prospect_type = 'status_unknown'
+       ORDER BY updated_at ASC`,
+      [userId]
+    );
+    return rows as ProspectRow[];
+  } finally {
+    connection.release();
+  }
+}
+
+async function updateProspectClassification(
+  prospectId: number,
+  patch: { followerCount?: number | null; prospectType?: ProspectType | null; userTitle?: string | null; bioText?: string | null }
+): Promise<void> {
+  const connection = await db.getConnection();
+  try {
+    const fields: string[] = [];
+    const values: Array<number | string | null> = [];
+
+    if ('followerCount' in patch) {
+      fields.push('follower_count = ?');
+      values.push(patch.followerCount ?? null);
+    }
+    if ('prospectType' in patch) {
+      fields.push('prospect_type = ?');
+      values.push(patch.prospectType ?? null);
+    }
+    if ('userTitle' in patch) {
+      fields.push('user_title = ?');
+      values.push(patch.userTitle ?? null);
+    }
+    if ('bioText' in patch) {
+      fields.push('bio_text = ?');
+      values.push(patch.bioText ?? null);
+    }
+
+    fields.push('bio_scraped = TRUE');
+    if (!fields.length) return;
+
+    values.push(prospectId);
+    await connection.query(`UPDATE affiliate_prospects SET ${fields.join(', ')} WHERE id = ?`, values);
   } finally {
     connection.release();
   }
@@ -625,6 +737,28 @@ async function openCommentsPanel(page: Page): Promise<void> {
   }
 }
 
+async function expandAllCommentReplies(page: Page): Promise<void> {
+  for (let i = 0; i < 8; i++) {
+    const clicked = await page.evaluate(() => {
+      const textCandidates = Array.from(document.querySelectorAll('button, span, div')) as HTMLElement[];
+      const target = textCandidates.find((el) => {
+        const text = (el.textContent || '').trim().toLowerCase();
+        return /^view\s+\d+\s+repl(y|ies)$/.test(text);
+      });
+
+      if (!target) return false;
+      target.click();
+      return true;
+    });
+
+    if (!clicked) {
+      break;
+    }
+
+    await delay(350);
+  }
+}
+
 async function postFreshComment(page: Page, commentText: string): Promise<{ success: boolean; error?: string }> {
   try {
     const activated = await page.evaluate(() => {
@@ -727,6 +861,44 @@ async function scrapeVideoContent(page: Page, maxComments = 10): Promise<{ capti
   }, maxComments);
 }
 
+async function scrapeVideoCommentsDetailed(page: Page, maxComments = 60): Promise<ScrapedComment[]> {
+  return page.evaluate((max: number) => {
+    const rows = Array.from(document.querySelectorAll('[data-e2e="comment-level-1"], [data-e2e="comment-item"]')) as HTMLElement[];
+    const out: ScrapedComment[] = [];
+
+    for (const row of rows.slice(0, max)) {
+      const userLink = row.querySelector('a[href*="/@"]') as HTMLAnchorElement | null;
+      const usernameText = (userLink?.textContent || '').trim().replace(/^@/, '');
+      const usernameFromHref = (() => {
+        const href = userLink?.getAttribute('href') || '';
+        const m = href.match(/\/@([^/?#]+)/);
+        return m?.[1] || '';
+      })();
+
+      const commentText =
+        (row.querySelector('[data-e2e="comment-text"]') as HTMLElement | null)?.innerText?.trim() ||
+        (row.querySelector('span.TUXText') as HTMLElement | null)?.innerText?.trim() ||
+        '';
+
+      const metaText = (row.querySelector('[data-e2e="comment-time-1"]') as HTMLElement | null)?.innerText?.trim() || '';
+      const relativeTime = metaText.split('\n')[0] || metaText;
+
+      const username = usernameText || usernameFromHref;
+      if (!username || !commentText) continue;
+
+      const profileUrl = usernameFromHref ? `https://www.tiktok.com/@${usernameFromHref}` : `https://www.tiktok.com/@${username}`;
+      out.push({
+        username,
+        text: commentText,
+        relativeTime,
+        profileUrl
+      });
+    }
+
+    return out;
+  }, maxComments);
+}
+
 async function scrapeProfileBioAndTitle(page: Page): Promise<{ userTitle: string; bioText: string }> {
   return page.evaluate(() => {
     const title =
@@ -741,6 +913,52 @@ async function scrapeProfileBioAndTitle(page: Page): Promise<{ userTitle: string
 
     return { userTitle: title, bioText: bio };
   });
+}
+
+async function scrapeProfileMeta(page: Page): Promise<{ userTitle: string; bioText: string; followerCount: number | null }> {
+  return page.evaluate(() => {
+    const title =
+      (document.querySelector('[data-e2e="user-title"]') as HTMLElement | null)?.innerText?.trim() ||
+      (document.querySelector('h1[data-e2e="user-title"]') as HTMLElement | null)?.innerText?.trim() ||
+      '';
+
+    const bio =
+      (document.querySelector('[data-e2e="user-bio"]') as HTMLElement | null)?.innerText?.trim() ||
+      (document.querySelector('[data-e2e="user-bio-description"]') as HTMLElement | null)?.innerText?.trim() ||
+      '';
+
+    const followersRaw =
+      (document.querySelector('[data-e2e="followers-count"]') as HTMLElement | null)?.innerText?.trim() ||
+      (document.querySelector('strong[title="Followers"]') as HTMLElement | null)?.innerText?.trim() ||
+      '';
+
+    return { userTitle: title, bioText: bio, followerCountRaw: followersRaw };
+  }).then((meta: any) => ({
+    userTitle: meta.userTitle || '',
+    bioText: meta.bioText || '',
+    followerCount: parseFollowerCount(meta.followerCountRaw)
+  }));
+}
+
+async function upsertProspectWithType(
+  userId: number,
+  username: string,
+  profileUrl: string,
+  prospectType: ProspectType
+): Promise<void> {
+  const connection = await db.getConnection();
+  try {
+    await connection.query(
+      `INSERT INTO affiliate_prospects (user_id, tiktok_username, profile_url, prospect_type)
+       VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         profile_url = VALUES(profile_url),
+         prospect_type = VALUES(prospect_type)`,
+      [userId, username, profileUrl, prospectType]
+    );
+  } finally {
+    connection.release();
+  }
 }
 
 async function tryFollowCurrentProfile(page: Page): Promise<boolean> {
@@ -1255,6 +1473,10 @@ async function findNextEligibleProspect(
       continue;
     }
 
+    if (prospect.prospect_type === 'status_unknown' || prospect.prospect_type === 'disqualified') {
+      continue;
+    }
+
     if (prospect.incogniton_account_id && prospect.incogniton_account_id !== accountId && !groupId) {
       continue;
     }
@@ -1318,11 +1540,30 @@ async function processProspect(
 
   prospect = (await getProspectById(prospect.id)) || prospect;
 
-  if (!asBool(prospect.bio_scraped)) {
-    const profileData = await scrapeProfileBioAndTitle(page);
-    await setProspectBio(prospect.id, profileData.userTitle, profileData.bioText);
-    prospect.user_title = profileData.userTitle || null;
-    prospect.bio_text = profileData.bioText || null;
+  if (!asBool(prospect.bio_scraped) || prospect.follower_count === null || !prospect.prospect_type) {
+    const profileData = await scrapeProfileMeta(page);
+    const inferredType: ProspectType =
+      profileData.followerCount !== null && profileData.followerCount >= config.minAffiliateFollowers
+        ? 'prospective_affiliate'
+        : 'prospective_customer';
+
+    await updateProspectClassification(prospect.id, {
+      userTitle: profileData.userTitle || null,
+      bioText: profileData.bioText || null,
+      followerCount: profileData.followerCount,
+      prospectType: prospect.prospect_type || inferredType
+    });
+
+    prospect = (await getProspectById(prospect.id)) || prospect;
+  }
+
+  if (prospect.prospect_type === 'disqualified') {
+    await snoozeProspect(prospect.id, getSnoozeDaysForProspect(prospect, config));
+    return true;
+  }
+
+  if (prospect.prospect_type === 'status_unknown') {
+    return false;
   }
 
   await markProspectVisited(prospect.id);
@@ -1374,8 +1615,10 @@ async function processProspect(
   if (Math.random() < 1) {
     await openCommentsPanel(page);
     await delay(1200);
+    await expandAllCommentReplies(page);
 
     const content = await scrapeVideoContent(page, 10);
+    const detailedComments = await scrapeVideoCommentsDetailed(page, 80);
     caption = content.caption || '';
     comments = content.comments || [];
 
@@ -1411,6 +1654,32 @@ async function processProspect(
             text: `✅ Affiliate comment posted on @${canonicalUsername}'s video`
           });
         }
+      }
+    }
+
+    const recentComments = detailedComments.filter((c) => isCommentRecentWithin7Days(c.relativeTime));
+    if (recentComments.length > 0) {
+      try {
+        const buyingIntentResults = await analyzeCommentsForBuyingIntent(recentComments, targetVideoUrl, {
+          aiPrompt: groupConfig.aiPrompt,
+          exampleDM: groupConfig.exampleDM,
+          exampleComment: groupConfig.exampleComment,
+          openaiApiKey: config.openaiApiKey
+        });
+
+        for (const result of buyingIntentResults) {
+          const matched = recentComments.find((c) => c.username.toLowerCase() === String(result.username || '').toLowerCase());
+          if (!matched) continue;
+
+          if (result.hasBuyingIntent) {
+            await upsertProspectWithType(userId, matched.username, matched.profileUrl, 'prospective_customer');
+            await addProspectEds(prospect.id, 1);
+          } else {
+            await upsertProspectWithType(userId, matched.username, matched.profileUrl, 'status_unknown');
+          }
+        }
+      } catch (error) {
+        console.log('[Affiliate Worker] Buying intent analysis failed:', error);
       }
     }
   }
@@ -1450,7 +1719,15 @@ async function processProspect(
   const currentEds = refreshedProspect?.engagement_depth_score ?? 0;
   const keepInTouch = refreshedProspect ? asBool(refreshedProspect.is_keep_in_touch) : false;
 
-  if (!keepInTouch && !dmSent && currentEds >= config.dmEdsThreshold && groupConfig.affiliateInvitationText?.trim() && Math.random() < 0.5) {
+  const isProspectiveAffiliate = refreshedProspect?.prospect_type === 'prospective_affiliate';
+  if (
+    isProspectiveAffiliate &&
+    !keepInTouch &&
+    !dmSent &&
+    currentEds >= config.dmEdsThreshold &&
+    groupConfig.affiliateInvitationText?.trim() &&
+    Math.random() < 0.5
+  ) {
     const alreadyContacted = await hasContactedUser(userId, canonicalUsername);
     if (!alreadyContacted) {
       const context = await getRecentContextForProspect(userId, canonicalUsername);
@@ -1497,6 +1774,100 @@ async function processProspect(
   }
 
   return true;
+}
+
+async function processStatusUnknownProspectsForAccount(
+  page: Page,
+  userId: number,
+  config: AffiliateConfig
+): Promise<number> {
+  const prospects = await getStatusUnknownProspects(userId);
+  let processed = 0;
+
+  for (const prospect of prospects) {
+    try {
+      const profileUrl = prospect.profile_url || `https://www.tiktok.com/@${prospect.tiktok_username}`;
+      await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+      const profileMeta = await scrapeProfileMeta(page);
+      if (profileMeta.followerCount !== null && profileMeta.followerCount < config.minAffiliateFollowers) {
+        await updateProspectClassification(prospect.id, {
+          followerCount: profileMeta.followerCount,
+          userTitle: profileMeta.userTitle || null,
+          bioText: profileMeta.bioText || null,
+          prospectType: 'disqualified'
+        });
+        processed += 1;
+        continue;
+      }
+
+      const outboundUrl = await page.evaluate(() => {
+        const links = Array.from(document.querySelectorAll('a[href^="http"]')) as HTMLAnchorElement[];
+        const picked = links.find((a) => {
+          const href = a.getAttribute('href') || '';
+          return href.startsWith('http') && !href.includes('tiktok.com');
+        });
+        return picked?.href || null;
+      });
+
+      let scrapedExternalHtml = '';
+      if (outboundUrl) {
+        try {
+          await page.goto(outboundUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+          scrapedExternalHtml = await page.content();
+          if (scrapedExternalHtml.length > 25000) {
+            scrapedExternalHtml = scrapedExternalHtml.slice(0, 25000);
+          }
+        } catch {
+          scrapedExternalHtml = '';
+        }
+
+        try {
+          await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        } catch {
+        }
+      }
+
+      const profileVideos = await getProfileVideoUrlsForCreator(page, prospect.tiktok_username);
+      if (!profileVideos.length) {
+        await updateProspectClassification(prospect.id, { prospectType: 'status_unknown' });
+        continue;
+      }
+
+      const opened = await openProfileVideoByClick(page, profileVideos[0]);
+      if (!opened) {
+        continue;
+      }
+
+      await openCommentsPanel(page);
+      await delay(1000);
+      await expandAllCommentReplies(page);
+
+      const video = await scrapeVideoContent(page, 10);
+      const classification = await classifyStatusUnknownProspect({
+        username: prospect.tiktok_username,
+        userTitle: profileMeta.userTitle || '',
+        bioText: profileMeta.bioText || '',
+        firstVideoCaption: video.caption || '',
+        firstVideoComments: (video.comments || []).slice(0, 10),
+        externalHtml: scrapedExternalHtml,
+        openaiApiKey: config.openaiApiKey
+      });
+
+      await updateProspectClassification(prospect.id, {
+        followerCount: profileMeta.followerCount,
+        userTitle: profileMeta.userTitle || null,
+        bioText: profileMeta.bioText || null,
+        prospectType: classification.qualifiesAsAffiliate ? 'prospective_affiliate' : 'disqualified'
+      });
+
+      processed += 1;
+    } catch (error) {
+      console.log(`[Affiliate Worker] Status Unknown analysis failed for @${prospect.tiktok_username}:`, error);
+    }
+  }
+
+  return processed;
 }
 
 export async function runAffiliateProcurementForAccounts(userId: number): Promise<void> {
@@ -1581,6 +1952,13 @@ export async function runAffiliateProcurementForAccounts(userId: number): Promis
 
       while ((await isAffiliateAutomationRunning(userId)) && sessionCount < maxUsersPerSession) {
         let prospect = await findNextEligibleProspect(userId, account.id, account.group_id);
+
+        if (!prospect) {
+          const statusUnknownProcessed = await processStatusUnknownProspectsForAccount(page, userId, config);
+          if (statusUnknownProcessed > 0) {
+            prospect = await findNextEligibleProspect(userId, account.id, account.group_id);
+          }
+        }
 
         if (!prospect) {
           const seeded = await seedProspectsFromKeyword(
