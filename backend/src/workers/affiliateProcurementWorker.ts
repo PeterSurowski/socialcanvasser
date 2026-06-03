@@ -93,6 +93,12 @@ interface SearchVideoCandidate {
   profileUrl: string;
 }
 
+interface Tier1SelectionResult {
+  prospect: ProspectRow | null;
+  allReachableProspectsSnoozed: boolean;
+  reachableProspectCount: number;
+}
+
 function asBool(value: unknown): boolean {
   return value === true || value === 1 || value === '1';
 }
@@ -227,6 +233,43 @@ async function saveAffiliateState(userId: number, keywordIndex: number, lastAcco
   }
 }
 
+async function getGroupLastProcessedProspectId(userId: number, groupId: number | null): Promise<number | null> {
+  if (!groupId) return null;
+
+  const connection = await db.getConnection();
+  try {
+    const [rows] = await connection.query(
+      `SELECT last_processed_prospect_id
+       FROM affiliate_group_state
+       WHERE user_id = ? AND group_id = ?
+       LIMIT 1`,
+      [userId, groupId]
+    );
+
+    return Number((rows as any[])[0]?.last_processed_prospect_id || 0) || null;
+  } finally {
+    connection.release();
+  }
+}
+
+async function setGroupLastProcessedProspectId(userId: number, groupId: number | null, prospectId: number): Promise<void> {
+  if (!groupId) return;
+
+  const connection = await db.getConnection();
+  try {
+    await connection.query(
+      `INSERT INTO affiliate_group_state (user_id, group_id, last_processed_prospect_id)
+       VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         last_processed_prospect_id = VALUES(last_processed_prospect_id),
+         updated_at = CURRENT_TIMESTAMP`,
+      [userId, groupId, prospectId]
+    );
+  } finally {
+    connection.release();
+  }
+}
+
 async function getAffiliateConfig(userId: number): Promise<AffiliateConfig | null> {
   const connection = await db.getConnection();
   try {
@@ -329,6 +372,21 @@ async function getProspectsOrdered(userId: number): Promise<ProspectRow[]> {
       [userId]
     );
     return rows as ProspectRow[];
+  } finally {
+    connection.release();
+  }
+}
+
+async function getProspectCount(userId: number): Promise<number> {
+  const connection = await db.getConnection();
+  try {
+    const [rows] = await connection.query(
+      `SELECT COUNT(*) AS total
+       FROM affiliate_prospects
+       WHERE user_id = ?`,
+      [userId]
+    );
+    return Number((rows as any[])[0]?.total || 0);
   } finally {
     connection.release();
   }
@@ -443,6 +501,35 @@ async function ensureGroupProspectAssignment(
     );
 
     return 'assigned';
+  } finally {
+    connection.release();
+  }
+}
+
+async function getGroupAssignmentMap(userId: number, groupId: number | null): Promise<Map<number, number>> {
+  const assignmentMap = new Map<number, number>();
+  if (!groupId) {
+    return assignmentMap;
+  }
+
+  const connection = await db.getConnection();
+  try {
+    const [rows] = await connection.query(
+      `SELECT prospect_id, assigned_account_id
+       FROM affiliate_group_assignments
+       WHERE user_id = ? AND group_id = ?`,
+      [userId, groupId]
+    );
+
+    for (const row of rows as any[]) {
+      const prospectId = Number(row.prospect_id || 0);
+      const assignedAccountId = Number(row.assigned_account_id || 0);
+      if (prospectId && assignedAccountId) {
+        assignmentMap.set(prospectId, assignedAccountId);
+      }
+    }
+
+    return assignmentMap;
   } finally {
     connection.release();
   }
@@ -1004,6 +1091,28 @@ async function tryFollowCurrentProfile(page: Page): Promise<boolean> {
 
 async function getSearchVideoCandidates(page: Page, keyword: string): Promise<SearchVideoCandidate[]> {
   await delay(2500);
+  const collectedUrls = new Set<string>();
+
+  const collectSearchUrls = async (): Promise<string[]> => {
+    return page.evaluate(() => {
+      const cards = Array.from(document.querySelectorAll('[data-e2e="search_top-item"], [data-e2e="feed-video"]'));
+      const cardUrls = cards
+        .map(card => {
+          const link = card.querySelector('a[href*="/video/"]') as HTMLAnchorElement | null;
+          return link?.getAttribute('href') || '';
+        })
+        .filter(Boolean);
+
+      if (cardUrls.length > 0) {
+        return cardUrls;
+      }
+
+      const fallback = Array.from(document.querySelectorAll('a[href*="/video/"]')) as HTMLAnchorElement[];
+      return fallback
+        .map(link => link.getAttribute('href') || '')
+        .filter(Boolean);
+    });
+  };
 
   try {
     await page.waitForFunction(
@@ -1053,6 +1162,10 @@ async function getSearchVideoCandidates(page: Page, keyword: string): Promise<Se
 
     console.log(`[Affiliate Worker] Initial videos loaded: ${scrollInfo.initialCount}`);
 
+    for (const url of await collectSearchUrls()) {
+      collectedUrls.add(normalizeTikTokUrl(url));
+    }
+
     if (scrollInfo.found) {
       console.log(`[Affiliate Worker] Scrollable container found: <${scrollInfo.containerTag}>`);
 
@@ -1063,48 +1176,63 @@ async function getSearchVideoCandidates(page: Page, keyword: string): Promise<Se
       let loadedVideos = scrollInfo.initialCount;
       let scrollAttempts = 0;
       const maxScrollAttempts = 100;
-      const targetCreators = 1000;
-      let noChangeCount = 0;
+      const uniqueUrls = new Set<string>();
+      let noNewUrlCount = 0;
+
+      for (const url of await collectSearchUrls()) {
+        uniqueUrls.add(normalizeTikTokUrl(url));
+      }
+      for (const url of uniqueUrls) {
+        collectedUrls.add(url);
+      }
 
       while (scrollAttempts < maxScrollAttempts) {
         scrollAttempts++;
-        const beforeCount = loadedVideos;
+        const beforeUniqueCount = uniqueUrls.size;
 
         // Use mouse wheel scroll (triggers TikTok's lazy loading)
         await page.mouse.wheel({ deltaY: 800 });
 
         // Wait for TikTok's lazy loading
-        await delay(2000);
+        await delay(2500);
+
+        // Collect any newly rendered URLs before TikTok virtualizes them away
+        const currentUrls = await collectSearchUrls();
+        for (const url of currentUrls) {
+          const normalizedUrl = normalizeTikTokUrl(url);
+          uniqueUrls.add(normalizedUrl);
+          collectedUrls.add(normalizedUrl);
+        }
 
         // Count videos after scroll
         loadedVideos = await page.evaluate(() => {
           return document.querySelectorAll('[data-e2e="search_top-item"]').length;
         });
 
-        const increased = loadedVideos > beforeCount;
+        const increased = uniqueUrls.size > beforeUniqueCount;
 
         // Log progress
         if (scrollAttempts % 5 === 0 || increased || scrollAttempts <= 3) {
-          console.log(`[Affiliate Worker] Scroll ${scrollAttempts}: ${beforeCount} → ${loadedVideos} videos ${increased ? '✅' : '⚠️'}`);
+          console.log(`[Affiliate Worker] Scroll ${scrollAttempts}: ${beforeUniqueCount} → ${uniqueUrls.size} unique URLs, ${loadedVideos} visible videos ${increased ? '✅' : '⚠️'}`);
         }
 
-        // Stop if no progress after 5 consecutive attempts
+        // Stop if no new unique URLs after repeated attempts
         if (!increased) {
-          noChangeCount++;
-          if (noChangeCount >= 5) {
-            console.log(`[Affiliate Worker] No new videos after ${noChangeCount} scroll attempts - stopping at ${loadedVideos} videos (all available)`);
+          noNewUrlCount++;
+          if (noNewUrlCount >= 10) {
+            console.log(`[Affiliate Worker] No new URLs after ${noNewUrlCount} scroll attempts - stopping at ${uniqueUrls.size} unique videos (all available)`);
             break;
           }
         } else {
-          noChangeCount = 0;
+          noNewUrlCount = 0;
         }
       }
 
       if (scrollAttempts >= maxScrollAttempts) {
-        console.log(`[Affiliate Worker] Reached max scroll attempts (${maxScrollAttempts}), proceeding with ${loadedVideos} videos`);
+        console.log(`[Affiliate Worker] Reached max scroll attempts (${maxScrollAttempts}), proceeding with ${uniqueUrls.size} unique videos`);
       }
 
-      console.log(`[Affiliate Worker] Scrolling complete: loaded ${loadedVideos} videos in ${scrollAttempts} scroll attempts`);
+      console.log(`[Affiliate Worker] Scrolling complete: collected ${uniqueUrls.size} unique videos in ${scrollAttempts} scroll attempts`);
     } else {
       console.log(`[Affiliate Worker] Could not find scrollable container, proceeding with initially loaded videos`);
     }
@@ -1112,25 +1240,7 @@ async function getSearchVideoCandidates(page: Page, keyword: string): Promise<Se
     console.log(`[Affiliate Worker] Error during scroll:`, scrollErr);
   }
 
-  const rawUrls: string[] = await page.evaluate(() => {
-    const cards = Array.from(document.querySelectorAll('[data-e2e="search_top-item"], [data-e2e="feed-video"]'));
-    const cardUrls = cards
-      .map(card => {
-        const link = card.querySelector('a[href*="/video/"]') as HTMLAnchorElement | null;
-        return link?.getAttribute('href') || '';
-      })
-      .filter(Boolean);
-
-    if (cardUrls.length > 0) {
-      return cardUrls.slice(0, 1000);
-    }
-
-    const fallback = Array.from(document.querySelectorAll('a[href*="/video/"]')) as HTMLAnchorElement[];
-    return fallback
-      .map(link => link.getAttribute('href') || '')
-      .filter(Boolean)
-      .slice(0, 1000);
-  });
+  const rawUrls: string[] = collectedUrls.size > 0 ? Array.from(collectedUrls) : await collectSearchUrls();
 
   const seenUrl = new Set<string>();
   const seenCreators = new Set<string>();
@@ -1456,44 +1566,81 @@ async function processNotificationsAndScore(
   }
 }
 
-async function findNextEligibleProspect(
+async function selectTier1Prospect(
   userId: number,
   accountId: number,
   groupId: number | null
-): Promise<ProspectRow | null> {
+): Promise<Tier1SelectionResult> {
   const prospects = await getProspectsOrdered(userId);
+  if (!prospects.length) {
+    return {
+      prospect: null,
+      allReachableProspectsSnoozed: false,
+      reachableProspectCount: 0
+    };
+  }
+
   const now = new Date();
+  const assignmentMap = await getGroupAssignmentMap(userId, groupId);
 
-  for (const prospect of prospects) {
-    if (prospect.snoozed_until && new Date(prospect.snoozed_until) > now) {
-      continue;
-    }
-
+  const reachableProspects = prospects.filter((prospect) => {
     if (asBool(prospect.is_ignore_list)) {
-      continue;
-    }
-
-    if (prospect.prospect_type === 'status_unknown' || prospect.prospect_type === 'disqualified') {
-      continue;
-    }
-
-    if (prospect.incogniton_account_id && prospect.incogniton_account_id !== accountId && !groupId) {
-      continue;
+      return false;
     }
 
     if (groupId) {
-      const assignmentState = await ensureGroupProspectAssignment(userId, groupId, prospect.id, accountId);
-      if (assignmentState === 'assigned_other_account') {
-        continue;
+      const assignedAccountId = assignmentMap.get(prospect.id);
+      if (assignedAccountId && assignedAccountId !== accountId) {
+        return false;
       }
-    } else if (prospect.incogniton_account_id && prospect.incogniton_account_id !== accountId) {
-      continue;
+      return true;
     }
 
-    return prospect;
+    if (prospect.incogniton_account_id && prospect.incogniton_account_id !== accountId) {
+      return false;
+    }
+
+    return true;
+  });
+
+  const allReachableProspectsSnoozed =
+    reachableProspects.length > 0 &&
+    reachableProspects.every((prospect) => prospect.snoozed_until && new Date(prospect.snoozed_until) > now);
+
+  const candidates = reachableProspects.filter((prospect) => {
+    if (prospect.snoozed_until && new Date(prospect.snoozed_until) > now) {
+      return false;
+    }
+
+    if (prospect.prospect_type === 'status_unknown' || prospect.prospect_type === 'disqualified') {
+      return false;
+    }
+
+    return true;
+  });
+
+  if (!candidates.length) {
+    return {
+      prospect: null,
+      allReachableProspectsSnoozed,
+      reachableProspectCount: reachableProspects.length
+    };
   }
 
-  return null;
+  let selectedProspect = candidates[0];
+  const lastProcessedProspectId = await getGroupLastProcessedProspectId(userId, groupId);
+  if (lastProcessedProspectId) {
+    const idx = candidates.findIndex((prospect) => prospect.id === lastProcessedProspectId);
+    if (idx >= 0) {
+      selectedProspect = candidates[(idx + 1) % candidates.length];
+    }
+  }
+
+  return {
+    prospect: selectedProspect,
+    allReachableProspectsSnoozed,
+    reachableProspectCount: reachableProspects.length
+  };
 }
 
 async function processProspect(
@@ -1951,40 +2098,57 @@ export async function runAffiliateProcurementForAccounts(userId: number): Promis
       await processNotificationsAndScore(page, userId);
 
       while ((await isAffiliateAutomationRunning(userId)) && sessionCount < maxUsersPerSession) {
-        let prospect = await findNextEligibleProspect(userId, account.id, account.group_id);
+        let tier1Selection = await selectTier1Prospect(userId, account.id, account.group_id);
+        let prospect = tier1Selection.prospect;
 
-        if (!prospect) {
+        if (!prospect && tier1Selection.allReachableProspectsSnoozed) {
           const statusUnknownProcessed = await processStatusUnknownProspectsForAccount(page, userId, config);
           if (statusUnknownProcessed > 0) {
-            prospect = await findNextEligibleProspect(userId, account.id, account.group_id);
+            tier1Selection = await selectTier1Prospect(userId, account.id, account.group_id);
+            prospect = tier1Selection.prospect;
           }
         }
 
         if (!prospect) {
-          const seeded = await seedProspectsFromKeyword(
-            page,
-            userId,
-            account.id,
-            account.group_id,
-            config.keywords,
-            keywordIndexRef
-          );
+          const existingProspectCount = await getProspectCount(userId);
 
-          if (seeded === 0) {
-            await delay(2500);
+          if (existingProspectCount === 0) {
+            const seeded = await seedProspectsFromKeyword(
+              page,
+              userId,
+              account.id,
+              account.group_id,
+              config.keywords,
+              keywordIndexRef
+            );
+
+            if (seeded === 0) {
+              await delay(2500);
+              break;
+            }
+
+            tier1Selection = await selectTier1Prospect(userId, account.id, account.group_id);
+            prospect = tier1Selection.prospect;
+            if (!prospect) {
+              await delay(1000);
+              continue;
+            }
+          } else {
+            console.log(`[Affiliate Worker] No eligible prospects for @${account.account_identifier}; skipping keyword seed because ${existingProspectCount} prospects already exist.`);
+            sendUserEvent(userId, {
+              type: 'info',
+              text: `ℹ️ Affiliate: no eligible prospects for @${account.account_identifier}; skipping keyword search because your prospects list is not empty.`
+            });
+            await delay(1500);
             break;
-          }
-
-          prospect = await findNextEligibleProspect(userId, account.id, account.group_id);
-          if (!prospect) {
-            await delay(1000);
-            continue;
           }
         }
 
+        const selectedProspectId = prospect.id;
         const processed = await processProspect(page, userId, account, config, groupConfig, prospect);
         if (processed) {
           sessionCount += 1;
+          await setGroupLastProcessedProspectId(userId, account.group_id, selectedProspectId);
         }
 
         const notificationInterval = maxUsersPerSession;

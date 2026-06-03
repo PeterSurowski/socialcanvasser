@@ -19,7 +19,6 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
   const [isVerifying, setIsVerifying] = useState(false)
 
   const handleAddAccount = () => {
-    if (accounts.length >= 10) return
     setShowSetupModal(true)
     setSetupStep('instructions')
     setBrowserType('incogniton') // Reset to default
@@ -137,10 +136,9 @@ export default function TikTokAccounts({ accounts, onUpdate, onNext }: TikTokAcc
 
       <button
         onClick={handleAddAccount}
-        disabled={accounts.length >= 10}
-        className="w-full py-3 px-4 border-2 border-dashed border-gray-300 rounded-lg text-gray-600 hover:border-blue-500 hover:text-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        className="w-full py-3 px-4 border-2 border-dashed border-gray-300 rounded-lg text-gray-600 hover:border-blue-500 hover:text-blue-600 transition-colors"
       >
-        + Add TikTok Account {accounts.length > 0 && `(${accounts.length}/10)`}
+        + Add TikTok Account {accounts.length > 0 && `(${accounts.length})`}
       </button>
 
       {accounts.length > 0 && (

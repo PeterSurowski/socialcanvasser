@@ -629,6 +629,32 @@ export async function searchTikTokByKeywords(
       if (!foundSelector) {
         console.log(`[TikTok Search] No video items found with any known selector for keyword: ${keyword}`);
       }
+
+      const normalizeVideoHref = (href: string): string => {
+        const raw = String(href || '').trim();
+        if (!raw || !raw.includes('/video/')) return '';
+        const absolute = raw.startsWith('http') ? raw : `https://www.tiktok.com${raw}`;
+        return absolute.split('?')[0];
+      };
+
+      const collectedVideoUrls = new Set<string>();
+      const collectCurrentVideoUrls = async (): Promise<string[]> => {
+        const hrefs = await page.evaluate(() => {
+          const itemLinks = Array.from(document.querySelectorAll('[data-e2e="search_top-item"] a[href*="/video/"]'))
+            .map(el => (el as HTMLAnchorElement).getAttribute('href') || '')
+            .filter(Boolean);
+
+          const fallbackLinks = Array.from(document.querySelectorAll('a[href*="/video/"]'))
+            .map(el => (el as HTMLAnchorElement).getAttribute('href') || '')
+            .filter(Boolean);
+
+          return [...itemLinks, ...fallbackLinks];
+        });
+
+        return hrefs
+          .map((href) => normalizeVideoHref(href))
+          .filter(Boolean);
+      };
       
       // SCROLL SEARCH RESULTS TO LOAD MORE VIDEOS (target: 200 videos or all available)
       console.log(`[TikTok Search] 📜 Scrolling search results to load more videos...`);
@@ -688,57 +714,60 @@ export async function searchTikTokByKeywords(
           await page.mouse.move(scrollInfo.x, scrollInfo.y);
           console.log(`[TikTok Search] ✅ Mouse positioned over search results`);
           await new Promise(resolve => setTimeout(resolve, 1500));
+
+          for (const url of await collectCurrentVideoUrls()) {
+            collectedVideoUrls.add(url);
+          }
           
           let loadedVideos = scrollInfo.initialCount;
           let scrollAttempts = 0;
-          const maxScrollAttempts = 50; // Safety limit
-          const targetVideos = 200; // Target: 200 videos
-          let noChangeCount = 0;
+          const maxScrollAttempts = 100; // Safety limit
+          let noNewUrlCount = 0;
           
-          while (loadedVideos < targetVideos && scrollAttempts < maxScrollAttempts) {
+          while (scrollAttempts < maxScrollAttempts) {
             scrollAttempts++;
             const beforeCount = loadedVideos;
+            const beforeUrlCount = collectedVideoUrls.size;
             
             // Scroll down
             await page.mouse.wheel({ deltaY: 800 });
             
-            // Wait 2s for TikTok lazy loading
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            // Wait for TikTok lazy loading
+            await new Promise(resolve => setTimeout(resolve, 2500));
+
+            for (const url of await collectCurrentVideoUrls()) {
+              collectedVideoUrls.add(url);
+            }
             
             // Count videos after scroll
             loadedVideos = await page.evaluate(() => {
               return document.querySelectorAll('[data-e2e="search_top-item"]').length;
             });
             
-            const increased = loadedVideos > beforeCount;
+            const increased = collectedVideoUrls.size > beforeUrlCount;
             
             // Log every scroll to track progress
             if (scrollAttempts % 5 === 0 || increased || scrollAttempts <= 3) {
-              console.log(`[TikTok Search] 📊 Scroll ${scrollAttempts}: ${beforeCount} → ${loadedVideos} videos ${increased ? '✅' : '⚠️'}`);
+              console.log(`[TikTok Search] 📊 Scroll ${scrollAttempts}: ${beforeUrlCount} → ${collectedVideoUrls.size} unique URLs, ${beforeCount} → ${loadedVideos} visible videos ${increased ? '✅' : '⚠️'}`);
             }
-            
-            if (loadedVideos >= targetVideos) {
-              console.log(`[TikTok Search] ✅ Reached target of ${targetVideos} videos! (loaded ${loadedVideos})`);
-              break;
-            }
-            
-            // Stop if no progress after 5 consecutive attempts
+
+            // Stop if no new URLs after repeated attempts
             if (!increased) {
-              noChangeCount++;
-              if (noChangeCount >= 5) {
-                console.log(`[TikTok Search] ⚠️ No new videos after ${noChangeCount} scroll attempts - stopping at ${loadedVideos} videos (might be all available)`);
+              noNewUrlCount++;
+              if (noNewUrlCount >= 10) {
+                console.log(`[TikTok Search] ⚠️ No new video URLs after ${noNewUrlCount} scroll attempts - stopping at ${collectedVideoUrls.size} unique URLs`);
                 break;
               }
             } else {
-              noChangeCount = 0;
+              noNewUrlCount = 0;
             }
           }
           
           if (scrollAttempts >= maxScrollAttempts) {
-            console.log(`[TikTok Search] ⚠️ Reached max scroll attempts (${maxScrollAttempts}), proceeding with ${loadedVideos} videos`);
+            console.log(`[TikTok Search] ⚠️ Reached max scroll attempts (${maxScrollAttempts}), proceeding with ${collectedVideoUrls.size} unique URLs`);
           }
           
-          console.log(`[TikTok Search] ✅ Scrolling complete: loaded ${loadedVideos} videos in ${scrollAttempts} scroll attempts`);
+          console.log(`[TikTok Search] ✅ Scrolling complete: loaded ${loadedVideos} visible videos and ${collectedVideoUrls.size} unique URLs in ${scrollAttempts} scroll attempts`);
         } else {
           console.log(`[TikTok Search] ⚠️ Could not find scrollable container, proceeding with initially loaded videos`);
         }
@@ -871,16 +900,33 @@ export async function searchTikTokByKeywords(
             }
           }
           
-          // Extract video URLs from the found items (up to 200 max)
-          debugInfo.results = items.slice(0, 200).map((item, index) => {
-            const link = item.querySelector('a[href*="/video/"]');
-            const href = link?.getAttribute('href') || 'unknown';
-            return { index, href };
-          }).filter(result => result.href !== 'unknown');
+          const itemHrefs = items.slice(0, 400)
+            .map(item => {
+              const link = item.querySelector('a[href*="/video/"]');
+              return link?.getAttribute('href') || '';
+            })
+            .filter(Boolean);
+
+          const fallbackHrefs = Array.from(document.querySelectorAll('a[href*="/video/"]'))
+            .map(link => (link as HTMLAnchorElement).getAttribute('href') || '')
+            .filter(Boolean);
+
+          debugInfo.videoLinksCount = fallbackHrefs.length;
+
+          const merged = [...itemHrefs, ...fallbackHrefs];
+          debugInfo.results = merged.map((href, index) => ({ index, href }));
           
           return debugInfo;
         });
         
+        // Merge extractor results with URLs collected continuously during scrolling.
+        const mergedResults = [
+          ...videoElements.results.map((r) => ({ href: normalizeVideoHref(r.href) })),
+          ...Array.from(collectedVideoUrls).map((href) => ({ href: normalizeVideoHref(href) }))
+        ].filter((r) => Boolean(r.href));
+
+        videoElements.results = mergedResults.map((r, index) => ({ index, href: r.href }));
+
         // Deduplicate video URLs (TikTok search results can contain duplicates after scrolling)
         const originalLength = videoElements.results.length;
         const seenUrls = new Set<string>();
