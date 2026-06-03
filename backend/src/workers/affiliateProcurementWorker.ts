@@ -6,7 +6,7 @@ import {
   generateAffiliateComment,
   generateAffiliateProspectDM
 } from '../services/openai.js';
-import { tryToSendDM, hasContactedUser, recordContact, logActivity } from '../services/engagement.js';
+import { tryToSendDM, hasContactedUser, recordContact, logActivity, postCommentReply } from '../services/engagement.js';
 import {
   connectBrowserForAccount,
   closeBrowserConnection,
@@ -635,6 +635,22 @@ async function addProspectEds(prospectId: number, points: number): Promise<void>
   }
 }
 
+async function addProspectEdsByUsername(userId: number, username: string, points: number): Promise<void> {
+  if (!points) return;
+  const connection = await db.getConnection();
+  try {
+    await connection.query(
+      `UPDATE affiliate_prospects
+       SET engagement_depth_score = engagement_depth_score + ?,
+           last_interaction_at = NOW()
+       WHERE user_id = ? AND tiktok_username = ?`,
+      [points, userId, username]
+    );
+  } finally {
+    connection.release();
+  }
+}
+
 async function setProspectBio(prospectId: number, userTitle: string, bioText: string): Promise<void> {
   const connection = await db.getConnection();
   try {
@@ -846,6 +862,75 @@ async function expandAllCommentReplies(page: Page): Promise<void> {
   }
 }
 
+async function loadAllCommentsForVideo(page: Page): Promise<void> {
+  try {
+    const scrollInfo = await page.evaluate(() => {
+      const commentsCountEl =
+        document.querySelector('[class*="DivCommentCountContainer"]') ||
+        document.querySelector('[data-e2e="comment-count"]') ||
+        document.querySelector('[data-e2e="browse-comment-count"]');
+
+      const totalComments = parseInt(commentsCountEl?.textContent?.replace(/[^0-9]/g, '') || '0', 10);
+
+      const containers = Array.from(
+        document.querySelectorAll('[class*="DivCommentListContainer"], [class*="DivCommentMain"], [class*="DivScrollingContentContainer"]')
+      ) as HTMLElement[];
+
+      const container = containers.find((el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.width > 150 && rect.height > 150;
+      }) as HTMLElement | undefined;
+
+      if (!container) {
+        return { found: false, totalComments };
+      }
+
+      const rect = container.getBoundingClientRect();
+      const viewportHeight = window.innerHeight;
+      const x = rect.left + rect.width / 2;
+      const y = Math.min(rect.top + 200, viewportHeight * 0.6);
+
+      return { found: true, totalComments, x, y };
+    });
+
+    const mouseX = Number(scrollInfo.x);
+    const mouseY = Number(scrollInfo.y);
+    if (!scrollInfo.found || !Number.isFinite(mouseX) || !Number.isFinite(mouseY)) {
+      return;
+    }
+
+    await page.mouse.move(mouseX, mouseY);
+    await delay(1200);
+
+    let loadedComments = await page.evaluate(() => document.querySelectorAll('[data-e2e="comment-level-1"]').length);
+    let attempts = 0;
+    let noGrowth = 0;
+    const maxAttempts = 50;
+    const target = Math.max(scrollInfo.totalComments || 0, loadedComments);
+
+    while (attempts < maxAttempts && loadedComments < target) {
+      attempts += 1;
+      const before = loadedComments;
+
+      await page.mouse.wheel({ deltaY: 800 });
+      await delay(2000);
+
+      loadedComments = await page.evaluate(() => document.querySelectorAll('[data-e2e="comment-level-1"]').length);
+
+      if (loadedComments > before) {
+        noGrowth = 0;
+      } else {
+        noGrowth += 1;
+        if (noGrowth >= 5) {
+          break;
+        }
+      }
+    }
+  } catch (error) {
+    console.log('[Affiliate Worker] Comment scrolling failed, continuing with currently loaded comments:', error);
+  }
+}
+
 async function postFreshComment(page: Page, commentText: string): Promise<{ success: boolean; error?: string }> {
   try {
     const activated = await page.evaluate(() => {
@@ -1000,6 +1085,60 @@ async function scrapeProfileBioAndTitle(page: Page): Promise<{ userTitle: string
 
     return { userTitle: title, bioText: bio };
   });
+}
+
+async function waitForProfileMetaToLoad(page: Page): Promise<void> {
+  await delay(2000);
+
+  try {
+    await page.waitForSelector('[data-e2e="followers-count"], strong[title="Followers"]', {
+      timeout: 30000,
+      visible: true
+    });
+
+    await page.waitForFunction(
+      () => {
+        const followersEl =
+          (document.querySelector('[data-e2e="followers-count"]') as HTMLElement | null) ||
+          (document.querySelector('strong[title="Followers"]') as HTMLElement | null);
+
+        return Boolean(followersEl?.innerText?.trim());
+      },
+      { timeout: 10000 }
+    );
+
+    await delay(750);
+  } catch (error) {
+    const diagnostics = await page.evaluate(() => {
+      const followersByDataE2E = document.querySelector('[data-e2e="followers-count"]') as HTMLElement | null;
+      const followersByTitle = document.querySelector('strong[title="Followers"]') as HTMLElement | null;
+      const statCandidates = Array.from(document.querySelectorAll('[data-e2e], strong[title]'))
+        .map((el) => ({
+          tag: el.tagName,
+          dataE2E: el.getAttribute('data-e2e'),
+          title: el.getAttribute('title'),
+          text: (el.textContent || '').trim().slice(0, 40)
+        }))
+        .filter((entry) => {
+          const dataE2E = String(entry.dataE2E || '');
+          const title = String(entry.title || '');
+          return dataE2E.includes('count') || title === 'Followers';
+        })
+        .slice(0, 12);
+
+      return {
+        url: window.location.href,
+        followersByDataE2EText: followersByDataE2E?.innerText?.trim() || '',
+        followersByTitleText: followersByTitle?.innerText?.trim() || '',
+        statCandidates
+      };
+    });
+
+    console.log('[Affiliate Worker] Profile meta wait timed out before follower scrape:', {
+      error: error instanceof Error ? error.message : String(error),
+      diagnostics
+    });
+  }
 }
 
 async function scrapeProfileMeta(page: Page): Promise<{ userTitle: string; bioText: string; followerCount: number | null }> {
@@ -1688,6 +1827,7 @@ async function processProspect(
   prospect = (await getProspectById(prospect.id)) || prospect;
 
   if (!asBool(prospect.bio_scraped) || prospect.follower_count === null || !prospect.prospect_type) {
+    await waitForProfileMetaToLoad(page);
     const profileData = await scrapeProfileMeta(page);
     const inferredType: ProspectType =
       profileData.followerCount !== null && profileData.followerCount >= config.minAffiliateFollowers
@@ -1763,9 +1903,10 @@ async function processProspect(
     await openCommentsPanel(page);
     await delay(1200);
     await expandAllCommentReplies(page);
+    await loadAllCommentsForVideo(page);
 
     const content = await scrapeVideoContent(page, 10);
-    const detailedComments = await scrapeVideoCommentsDetailed(page, 80);
+    const detailedComments = await scrapeVideoCommentsDetailed(page, 400);
     caption = content.caption || '';
     comments = content.comments || [];
 
@@ -1820,7 +1961,38 @@ async function processProspect(
 
           if (result.hasBuyingIntent) {
             await upsertProspectWithType(userId, matched.username, matched.profileUrl, 'prospective_customer');
-            await addProspectEds(prospect.id, 1);
+
+            const replyText = String(result.customizedReply || '').trim();
+            if (replyText) {
+              const alreadyContacted = await hasContactedUser(userId, matched.username);
+              if (!alreadyContacted) {
+                const replyResult = await postCommentReply(page, targetVideoUrl, replyText, matched.username);
+                if (replyResult.success) {
+                  await recordContact(userId, matched.username, 'comment', account.id, targetVideoUrl);
+                  await logActivity(
+                    userId,
+                    account.id,
+                    'comment_posted',
+                    matched.username,
+                    targetVideoUrl,
+                    replyText,
+                    true
+                  );
+                  await addProspectEdsByUsername(userId, matched.username, 1);
+                } else {
+                  await logActivity(
+                    userId,
+                    account.id,
+                    'comment_posted',
+                    matched.username,
+                    targetVideoUrl,
+                    replyText,
+                    false,
+                    replyResult.error
+                  );
+                }
+              }
+            }
           } else {
             await upsertProspectWithType(userId, matched.username, matched.profileUrl, 'status_unknown');
           }
@@ -1936,6 +2108,7 @@ async function processStatusUnknownProspectsForAccount(
       const profileUrl = prospect.profile_url || `https://www.tiktok.com/@${prospect.tiktok_username}`;
       await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
+      await waitForProfileMetaToLoad(page);
       const profileMeta = await scrapeProfileMeta(page);
       if (profileMeta.followerCount !== null && profileMeta.followerCount < config.minAffiliateFollowers) {
         await updateProspectClassification(prospect.id, {
