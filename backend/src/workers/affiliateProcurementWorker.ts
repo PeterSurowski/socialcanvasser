@@ -161,6 +161,27 @@ function parseRelativeTimeToDays(relativeTime: string): number {
   const y = text.match(/(\d+)\s*(y|yr|year|years)\b/);
   if (y) return Number(y[1]) * 365;
 
+  // TikTok sometimes returns month-day with no year (e.g., "4-21").
+  // Interpret as the most recent occurrence of that date.
+  const md = text.match(/^(\d{1,2})-(\d{1,2})$/);
+  if (md) {
+    const month = Number(md[1]);
+    const day = Number(md[2]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      const now = new Date();
+      const currentYear = now.getFullYear();
+      let candidate = new Date(currentYear, month - 1, day);
+
+      // If date is in the future relative to now, assume previous year.
+      if (candidate.getTime() > now.getTime()) {
+        candidate = new Date(currentYear - 1, month - 1, day);
+      }
+
+      const diffMs = now.getTime() - candidate.getTime();
+      return diffMs >= 0 ? diffMs / (1000 * 60 * 60 * 24) : Number.POSITIVE_INFINITY;
+    }
+  }
+
   return Number.POSITIVE_INFINITY;
 }
 
@@ -824,17 +845,55 @@ async function likeVideo(page: Page): Promise<boolean> {
 
 async function openCommentsPanel(page: Page): Promise<void> {
   try {
-    const commentsAlreadyOpen = await page.evaluate(() => {
-      return document.querySelectorAll('[data-e2e="comment-level-1"], [data-e2e="comment-item"]').length > 0;
+    const beforeState = await page.evaluate(() => {
+      const level1 = document.querySelectorAll('[data-e2e="comment-level-1"]').length;
+      const item = document.querySelectorAll('[data-e2e="comment-item"]').length;
+      const generic = document.querySelectorAll('div[class*="CommentItem"], div[class*="comment-item"]').length;
+      return {
+        level1,
+        item,
+        generic,
+        total: Math.max(level1, item, generic)
+      };
     });
-    if (commentsAlreadyOpen) return;
+    if (beforeState.total > 0) {
+      console.log('[Affiliate Worker] Comments appear already open:', beforeState);
+      return;
+    }
 
-    await page.evaluate(() => {
+    const clickAttempt = await page.evaluate(() => {
       const icon = document.querySelector('[data-e2e="comment-icon"]');
-      const btn = icon?.closest('button') as HTMLButtonElement | null;
-      if (btn) btn.click();
+      const iconButton = icon?.closest('button') as HTMLButtonElement | null;
+      const explicitButtons = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+      const textButton = explicitButtons.find((btn) => {
+        const text = (btn.textContent || '').trim().toLowerCase();
+        return text === 'comments' || text === 'comment';
+      });
+
+      const target = iconButton || textButton;
+      if (!target) {
+        return { clicked: false, hadIcon: Boolean(icon), foundTextButton: Boolean(textButton) };
+      }
+
+      target.click();
+      return { clicked: true, hadIcon: Boolean(icon), foundTextButton: Boolean(textButton) };
     });
+    console.log('[Affiliate Worker] Comment panel click attempt:', clickAttempt);
+
     await delay(1500);
+
+    const afterState = await page.evaluate(() => {
+      const level1 = document.querySelectorAll('[data-e2e="comment-level-1"]').length;
+      const item = document.querySelectorAll('[data-e2e="comment-item"]').length;
+      const generic = document.querySelectorAll('div[class*="CommentItem"], div[class*="comment-item"]').length;
+      return {
+        level1,
+        item,
+        generic,
+        total: Math.max(level1, item, generic)
+      };
+    });
+    console.log('[Affiliate Worker] Comments state after opening panel:', afterState);
   } catch (error) {
     console.log('[Affiliate] ⚠️ openCommentsPanel error:', error);
   }
@@ -882,7 +941,7 @@ async function loadAllCommentsForVideo(page: Page): Promise<void> {
       }) as HTMLElement | undefined;
 
       if (!container) {
-        return { found: false, totalComments };
+        return { found: false, totalComments, visibleContainers: containers.length };
       }
 
       const rect = container.getBoundingClientRect();
@@ -890,42 +949,163 @@ async function loadAllCommentsForVideo(page: Page): Promise<void> {
       const x = rect.left + rect.width / 2;
       const y = Math.min(rect.top + 200, viewportHeight * 0.6);
 
-      return { found: true, totalComments, x, y };
+      const level1Count = document.querySelectorAll('[data-e2e="comment-level-1"]').length;
+      const itemCount = document.querySelectorAll('[data-e2e="comment-item"]').length;
+      const genericCount = document.querySelectorAll('div[class*="CommentItem"], div[class*="comment-item"]').length;
+
+      return {
+        found: true,
+        totalComments,
+        x,
+        y,
+        level1Count,
+        itemCount,
+        genericCount,
+        containerTag: container.tagName,
+        containerClass: container.className,
+        scrollTop: container.scrollTop,
+        scrollHeight: container.scrollHeight,
+        clientHeight: container.clientHeight
+      };
+    });
+
+    console.log('[Affiliate Worker] Comment scroll init:', {
+      found: scrollInfo.found,
+      totalComments: scrollInfo.totalComments,
+      visibleContainers: scrollInfo.visibleContainers,
+      level1Count: scrollInfo.level1Count,
+      itemCount: scrollInfo.itemCount,
+      genericCount: scrollInfo.genericCount,
+      containerTag: scrollInfo.containerTag,
+      containerClass: scrollInfo.containerClass,
+      scrollTop: scrollInfo.scrollTop,
+      scrollHeight: scrollInfo.scrollHeight,
+      clientHeight: scrollInfo.clientHeight
     });
 
     const mouseX = Number(scrollInfo.x);
     const mouseY = Number(scrollInfo.y);
     if (!scrollInfo.found || !Number.isFinite(mouseX) || !Number.isFinite(mouseY)) {
+      console.log('[Affiliate Worker] No suitable comment scroll container found; skipping deep scroll');
       return;
     }
 
     await page.mouse.move(mouseX, mouseY);
     await delay(1200);
 
-    let loadedComments = await page.evaluate(() => document.querySelectorAll('[data-e2e="comment-level-1"]').length);
+    let loadedComments = await page.evaluate(() => {
+      const level1 = document.querySelectorAll('[data-e2e="comment-level-1"]').length;
+      const item = document.querySelectorAll('[data-e2e="comment-item"]').length;
+      const generic = document.querySelectorAll('div[class*="CommentItem"], div[class*="comment-item"]').length;
+      return Math.max(level1, item, generic);
+    });
     let attempts = 0;
     let noGrowth = 0;
-    const maxAttempts = 50;
-    const target = Math.max(scrollInfo.totalComments || 0, loadedComments);
+    let bottomStalls = 0;
+    const maxAttempts = 120;
+    const target = scrollInfo.totalComments > 0 ? Math.max(scrollInfo.totalComments, loadedComments) : Number.POSITIVE_INFINITY;
+    console.log(`[Affiliate Worker] Comment scroll target: ${Number.isFinite(target) ? target : 'unknown/infinite'} (starting at ${loadedComments})`);
 
-    while (attempts < maxAttempts && loadedComments < target) {
+    while (attempts < maxAttempts) {
       attempts += 1;
       const before = loadedComments;
 
       await page.mouse.wheel({ deltaY: 800 });
       await delay(2000);
 
-      loadedComments = await page.evaluate(() => document.querySelectorAll('[data-e2e="comment-level-1"]').length);
+      const stateAfterScroll = await page.evaluate(() => {
+        const level1 = document.querySelectorAll('[data-e2e="comment-level-1"]').length;
+        const item = document.querySelectorAll('[data-e2e="comment-item"]').length;
+        const generic = document.querySelectorAll('div[class*="CommentItem"], div[class*="comment-item"]').length;
+        const containers = Array.from(
+          document.querySelectorAll('[class*="DivCommentListContainer"], [class*="DivCommentMain"], [class*="DivScrollingContentContainer"]')
+        ) as HTMLElement[];
+        const container = containers.find((el) => {
+          const rect = el.getBoundingClientRect();
+          return rect.width > 150 && rect.height > 150;
+        }) as HTMLElement | undefined;
+
+        return {
+          loadedComments: Math.max(level1, item, generic),
+          level1,
+          item,
+          generic,
+          scrollTop: container?.scrollTop ?? null,
+          maxScrollTop:
+            container && Number.isFinite(container.scrollHeight - container.clientHeight)
+              ? container.scrollHeight - container.clientHeight
+              : null,
+          scrollHeight: container?.scrollHeight ?? null,
+          clientHeight: container?.clientHeight ?? null
+        };
+      });
+
+      loadedComments = stateAfterScroll.loadedComments;
+
+      console.log(
+        `[Affiliate Worker] Scroll attempt ${attempts}: comments ${before} -> ${loadedComments} (level1=${stateAfterScroll.level1}, item=${stateAfterScroll.item}, generic=${stateAfterScroll.generic}, scrollTop=${stateAfterScroll.scrollTop}, scrollHeight=${stateAfterScroll.scrollHeight}, clientHeight=${stateAfterScroll.clientHeight})`
+      );
+
+      const atBottom =
+        stateAfterScroll.scrollTop !== null &&
+        stateAfterScroll.maxScrollTop !== null &&
+        stateAfterScroll.scrollTop >= stateAfterScroll.maxScrollTop - 2;
 
       if (loadedComments > before) {
         noGrowth = 0;
+        bottomStalls = 0;
       } else {
         noGrowth += 1;
-        if (noGrowth >= 5) {
+
+        if (atBottom) {
+          bottomStalls += 1;
+
+          // Nudge up and back down to trigger next virtualized page load.
+          await page.evaluate(() => {
+            const containers = Array.from(
+              document.querySelectorAll('[class*="DivCommentListContainer"], [class*="DivCommentMain"], [class*="DivScrollingContentContainer"]')
+            ) as HTMLElement[];
+            const container = containers.find((el) => {
+              const rect = el.getBoundingClientRect();
+              return rect.width > 150 && rect.height > 150;
+            }) as HTMLElement | undefined;
+
+            if (!container) return;
+            container.scrollTop = Math.max(0, container.scrollTop - Math.max(220, Math.floor(container.clientHeight * 0.35)));
+          });
+          await delay(700);
+
+          await page.evaluate(() => {
+            const containers = Array.from(
+              document.querySelectorAll('[class*="DivCommentListContainer"], [class*="DivCommentMain"], [class*="DivScrollingContentContainer"]')
+            ) as HTMLElement[];
+            const container = containers.find((el) => {
+              const rect = el.getBoundingClientRect();
+              return rect.width > 150 && rect.height > 150;
+            }) as HTMLElement | undefined;
+
+            if (!container) return;
+            container.scrollTop = Math.min(
+              container.scrollHeight,
+              container.scrollTop + Math.max(420, Math.floor(container.clientHeight * 0.75))
+            );
+          });
+          await delay(900);
+        }
+
+        if (noGrowth >= 10 && bottomStalls >= 4) {
+          console.log('[Affiliate Worker] Stopping comment scroll: virtualized list appears exhausted (no growth with repeated bottom stalls)');
           break;
         }
       }
+
+      if (scrollInfo.totalComments > 0 && loadedComments >= scrollInfo.totalComments) {
+        console.log('[Affiliate Worker] Reached expected comment count based on UI comment counter');
+        break;
+      }
     }
+
+    console.log(`[Affiliate Worker] Comment scrolling complete after ${attempts} attempts; loadedComments=${loadedComments}`);
   } catch (error) {
     console.log('[Affiliate Worker] Comment scrolling failed, continuing with currently loaded comments:', error);
   }
@@ -1034,41 +1214,176 @@ async function scrapeVideoContent(page: Page, maxComments = 10): Promise<{ capti
 }
 
 async function scrapeVideoCommentsDetailed(page: Page, maxComments = 60): Promise<ScrapedComment[]> {
-  return page.evaluate((max: number) => {
-    const rows = Array.from(document.querySelectorAll('[data-e2e="comment-level-1"], [data-e2e="comment-item"]')) as HTMLElement[];
-    const out: ScrapedComment[] = [];
+  console.log(`[Affiliate Worker] scrapeVideoCommentsDetailed() starting (maxComments=${maxComments})`);
+  const result = await page.evaluate((max: number) => {
+    const commentSelectors = [
+      '[data-e2e="comment-item"]',
+      '[data-e2e="comment-level-1"]',
+      'div[class*="CommentItem"]',
+      'div[class*="comment-item"]',
+      '[data-e2e="comment-list"] > div',
+      'div[class*="Comment"]'
+    ];
 
-    for (const row of rows.slice(0, max)) {
-      const userLink = row.querySelector('a[href*="/@"]') as HTMLAnchorElement | null;
-      const usernameText = (userLink?.textContent || '').trim().replace(/^@/, '');
-      const usernameFromHref = (() => {
-        const href = userLink?.getAttribute('href') || '';
-        const m = href.match(/\/@([^/?#]+)/);
-        return m?.[1] || '';
-      })();
-
-      const commentText =
-        (row.querySelector('[data-e2e="comment-text"]') as HTMLElement | null)?.innerText?.trim() ||
-        (row.querySelector('span.TUXText') as HTMLElement | null)?.innerText?.trim() ||
-        '';
-
-      const metaText = (row.querySelector('[data-e2e="comment-time-1"]') as HTMLElement | null)?.innerText?.trim() || '';
-      const relativeTime = metaText.split('\n')[0] || metaText;
-
-      const username = usernameText || usernameFromHref;
-      if (!username || !commentText) continue;
-
-      const profileUrl = usernameFromHref ? `https://www.tiktok.com/@${usernameFromHref}` : `https://www.tiktok.com/@${username}`;
-      out.push({
-        username,
-        text: commentText,
-        relativeTime,
-        profileUrl
-      });
+    let commentElements: any[] = [];
+    let selectorUsed = '';
+    for (const selector of commentSelectors) {
+      commentElements = Array.from(document.querySelectorAll(selector));
+      if (commentElements.length > 0) {
+        selectorUsed = selector;
+        break;
+      }
     }
 
-    return out;
+    const sampleDataE2E = Array.from(document.querySelectorAll('[data-e2e]'))
+      .slice(0, 40)
+      .map((el: any) => el.getAttribute('data-e2e'))
+      .filter((value): value is string => Boolean(value));
+
+    const timeDiagnostics = commentElements.slice(0, Math.min(max, 10)).map((el: any, index: number) => {
+      const wrapper =
+        el.closest('[class*="DivCommentItemWrapper"]') ||
+        el.closest('[data-e2e="comment-item"]') ||
+        el;
+
+      const spanTexts = Array.from(wrapper?.querySelectorAll?.('span') || [])
+        .map((span: any) => (span.textContent || '').trim())
+        .filter(Boolean)
+        .slice(0, 12);
+
+      const matchingTimeTexts = spanTexts.filter((text: string) => {
+        return (
+          /\d+[smhdw]\s*ago/i.test(text) ||
+          /^(yesterday|just now)$/i.test(text) ||
+          /^\d+\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|week|weeks|mo|month|months|y|yr|year|years)\b/i.test(text) ||
+          /^\d{1,2}-\d{1,2}$/.test(text) ||
+          /^\d{4}-\d{1,2}-\d{1,2}$/.test(text) ||
+          /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}/i.test(text)
+        );
+      });
+
+      return {
+        index: index + 1,
+        wrapperTag: wrapper?.tagName || null,
+        wrapperDataE2E: wrapper?.getAttribute?.('data-e2e') || null,
+        wrapperClass: String(wrapper?.className || '').slice(0, 140),
+        matchingTimeTexts,
+        spanSample: spanTexts.slice(0, 6),
+        textSample: String((el as any)?.innerText || (el as any)?.textContent || '').slice(0, 140)
+      };
+    });
+
+    const comments = commentElements.map((el: any) => {
+      try {
+        const wrapper =
+          el.closest('[class*="DivCommentItemWrapper"]') ||
+          el.closest('[class*="DivContentContainer"]') ||
+          el.closest('[data-e2e="comment-item"]') ||
+          el.parentElement ||
+          el;
+
+        // Username: Extract actual username from href, not display name (which may have emojis)
+        const usernameContainer =
+          wrapper.querySelector('[data-e2e^="comment-username"]') ||
+          wrapper;
+        const usernameLink =
+          (wrapper.querySelector('a[href*="/@"]') as any) ||
+          usernameContainer?.querySelector('a');
+
+        let commentUsername = '';
+        if (usernameLink) {
+          // Extract username from href like "/@username" or "/user/username"
+          const href = usernameLink.getAttribute('href');
+          if (href) {
+            const match = href.match(/\/@([^/?]+)/); // Match /@username
+            if (match) {
+              commentUsername = match[1]; // Get username without @
+            }
+          }
+        }
+
+        // Fallback to text content if href extraction failed
+        if (!commentUsername) {
+          commentUsername =
+            usernameContainer?.textContent?.trim().replace('@', '') ||
+            (usernameContainer?.querySelector('a p') || usernameContainer?.querySelector('p'))?.textContent?.trim().replace('@', '') ||
+            '';
+        }
+
+        // Comment text: it's a child span of the comment-level-1 element
+        const commentText =
+          (wrapper.querySelector('[data-e2e="comment-level-1"]') as any)?.textContent?.trim() ||
+          (wrapper.querySelector('[data-e2e="comment-text"]') as any)?.textContent?.trim() ||
+          (wrapper.querySelector('span.TUXText') as any)?.textContent?.trim() ||
+          (el.querySelector('span.TUXText') as any)?.textContent?.trim() ||
+          (el.querySelector('span') as any)?.textContent?.trim() ||
+          '';
+
+        // Likes: look in the parent comment wrapper
+        const likeContainer = wrapper.querySelector('[class*="DivLikeContainer"]');
+        const commentLikes = parseInt((likeContainer?.querySelector('span'))?.textContent?.replace(/[^0-9]/g, '') || '0', 10);
+
+        // Time: look for all span elements and find the one with time text
+        // TikTok formats: "5d ago", "2h ago", "Yesterday", "Just now", "12-22", "2024-01-15", "Jan 18"
+        const allSpans = Array.from(wrapper?.querySelectorAll('span') || []);
+
+        const directTime =
+          (wrapper.querySelector('[data-e2e^="comment-time"]') as any)?.textContent?.trim() ||
+          (wrapper.querySelector('[data-e2e="comment-time-1"]') as any)?.textContent?.trim() ||
+          '';
+
+        let relativeTime = '';
+        if (directTime) {
+          relativeTime = directTime;
+        }
+        for (const span of allSpans) {
+          if (relativeTime) break;
+          const text = span.textContent?.trim() || '';
+          // Check if this span contains a time pattern
+          if (
+            /\d+[smhdw]\s*ago/i.test(text) ||           // "5d ago", "2h ago"
+            /^(yesterday|just now)$/i.test(text) ||      // "Yesterday", "Just now"
+            /^\d{1,2}-\d{1,2}$/.test(text) ||            // "12-22", "1-5"
+            /^\d{4}-\d{1,2}-\d{1,2}$/.test(text) ||      // "2024-01-15"
+            /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}/i.test(text) // "Jan 18"
+          ) {
+            relativeTime = text;
+            break;
+          }
+        }
+
+        return {
+          username: commentUsername,
+          text: commentText,
+          likes: commentLikes,
+          relativeTime,
+          profileUrl: commentUsername ? `https://www.tiktok.com/@${commentUsername}` : ''
+        };
+      } catch (err) {
+        return null;
+      }
+    }).filter((c: any) => c && c.username && c.text);
+
+    return {
+      selectorUsed,
+      commentElementCount: commentElements.length,
+      sampleDataE2E,
+      timeDiagnostics,
+      comments
+    };
   }, maxComments);
+
+  console.log(
+    `[Affiliate Worker] Comment extraction selector: ${result.selectorUsed || 'NONE'} | elements: ${result.commentElementCount} | extracted: ${result.comments.length}`
+  );
+  if (result.timeDiagnostics?.length) {
+    console.log('[Affiliate Worker] Pre-extraction time diagnostics:', result.timeDiagnostics);
+  }
+  if (!result.commentElementCount) {
+    console.log('[Affiliate Worker] No comment elements found. Sample page data-e2e:', result.sampleDataE2E.slice(0, 20));
+  }
+
+  return result.comments;
 }
 
 async function scrapeProfileBioAndTitle(page: Page): Promise<{ userTitle: string; bioText: string }> {
@@ -1633,6 +1948,57 @@ async function processNotificationsAndScore(
 
     await delay(1200);
 
+    // Click any visible "Follow back" buttons in the notification panel before scraping
+    let followBackClicked = 0;
+    for (let pass = 0; pass < 8; pass++) {
+      const clickedAny = await page.evaluate(() => {
+        const btns = Array.from(
+          document.querySelectorAll('[data-e2e="follow-back"]')
+        ) as HTMLButtonElement[];
+        const visible = btns.filter((btn) => {
+          const rect = btn.getBoundingClientRect();
+          return (
+            rect.width > 0 &&
+            rect.height > 0 &&
+            rect.top >= 0 &&
+            rect.bottom <= window.innerHeight &&
+            !btn.disabled
+          );
+        });
+        if (!visible.length) return false;
+        visible.forEach((btn) => btn.click());
+        return visible.length;
+      });
+
+      if (clickedAny) {
+        followBackClicked += Number(clickedAny);
+        console.log(`[Affiliate Worker] Clicked ${clickedAny} Follow-back button(s) (pass ${pass + 1})`);
+        await delay(600);
+      }
+
+      // Scroll the panel to reveal more items
+      await page.evaluate(() => {
+        const panel =
+          (document.querySelector('[data-e2e="inbox-list"]') as HTMLElement | null) ||
+          (document.querySelector('#header-inbox-list') as HTMLElement | null);
+        if (panel) panel.scrollBy({ top: 600, left: 0, behavior: 'auto' });
+      });
+      await page.mouse.wheel({ deltaY: 600 });
+      await delay(500);
+
+      // Stop early if no more buttons found after two empty passes
+      const hasMore = await page.evaluate(() => {
+        return document.querySelectorAll('[data-e2e="follow-back"]').length > 0;
+      });
+      if (!hasMore && pass >= 1) break;
+    }
+
+    if (followBackClicked > 0) {
+      console.log(`[Affiliate Worker] ✅ Followed back ${followBackClicked} user(s) from notification panel`);
+    } else {
+      console.log('[Affiliate Worker] No Follow-back buttons found in notification panel');
+    }
+
     const collected = new Set<string>();
     let noGrowthRounds = 0;
 
@@ -1905,8 +2271,22 @@ async function processProspect(
     await expandAllCommentReplies(page);
     await loadAllCommentsForVideo(page);
 
+    const preScrapeCounts = await page.evaluate(() => {
+      const level1 = document.querySelectorAll('[data-e2e="comment-level-1"]').length;
+      const item = document.querySelectorAll('[data-e2e="comment-item"]').length;
+      const generic = document.querySelectorAll('div[class*="CommentItem"], div[class*="comment-item"]').length;
+      return { level1, item, generic };
+    });
+    console.log('[Affiliate Worker] Pre-scrape comment element counts:', preScrapeCounts);
+
     const content = await scrapeVideoContent(page, 10);
     const detailedComments = await scrapeVideoCommentsDetailed(page, 400);
+    console.log(`[Affiliate Worker] scrapeVideoCommentsDetailed() collected ${detailedComments.length} comments`);
+    detailedComments.slice(0, 50).forEach((comment, index) => {
+      console.log(
+        `[Affiliate Worker] Comment ${index + 1}: @${comment.username} | ${comment.relativeTime} | ${comment.text.substring(0, 120)}`
+      );
+    });
     caption = content.caption || '';
     comments = content.comments || [];
 
@@ -1945,15 +2325,35 @@ async function processProspect(
       }
     }
 
-    const recentComments = detailedComments.filter((c) => isCommentRecentWithin7Days(c.relativeTime));
+    const recentComments = detailedComments.filter((c, index) => {
+      const parsedDays = parseRelativeTimeToDays(c.relativeTime);
+      const isRecent = parsedDays <= 7;
+      console.log(
+        `[Affiliate Worker] Time parse ${index + 1}: @${c.username} | raw="${c.relativeTime}" | parsedDays=${Number.isFinite(parsedDays) ? parsedDays.toFixed(3) : 'INF'} | within7Days=${isRecent}`
+      );
+      return isRecent;
+    });
+    console.log(
+      `[Affiliate Worker] Recent comments within 7 days: ${recentComments.length} / ${detailedComments.length}`
+    );
+    recentComments.slice(0, 50).forEach((comment, index) => {
+      console.log(
+        `[Affiliate Worker] Recent ${index + 1}: @${comment.username} | ${comment.relativeTime} | ${comment.text.substring(0, 120)}`
+      );
+    });
     if (recentComments.length > 0) {
       try {
+        console.log(
+          `[Affiliate Worker] Sending ${recentComments.length} recent comments to OpenAI for buying intent analysis on ${targetVideoUrl}`
+        );
         const buyingIntentResults = await analyzeCommentsForBuyingIntent(recentComments, targetVideoUrl, {
           aiPrompt: groupConfig.aiPrompt,
           exampleDM: groupConfig.exampleDM,
           exampleComment: groupConfig.exampleComment,
           openaiApiKey: config.openaiApiKey
         });
+
+        console.log(`[Affiliate Worker] OpenAI returned ${buyingIntentResults.length} buying-intent results`);
 
         for (const result of buyingIntentResults) {
           const matched = recentComments.find((c) => c.username.toLowerCase() === String(result.username || '').toLowerCase());
