@@ -82,6 +82,7 @@ type ProspectType = 'prospective_affiliate' | 'prospective_customer' | 'status_u
 
 interface ScrapedComment {
   username: string;
+  userTitle?: string;
   text: string;
   relativeTime: string;
   profileUrl: string;
@@ -900,29 +901,171 @@ async function openCommentsPanel(page: Page): Promise<void> {
 }
 
 async function expandAllCommentReplies(page: Page): Promise<void> {
-  for (let i = 0; i < 8; i++) {
-    const clicked = await page.evaluate(() => {
-      const textCandidates = Array.from(document.querySelectorAll('button, span, div')) as HTMLElement[];
-      const target = textCandidates.find((el) => {
-        const text = (el.textContent || '').trim().toLowerCase();
-        return /^view\s+\d+\s+repl(y|ies)$/.test(text);
-      });
+  let totalClicks = 0;
+  let stagnantPasses = 0;
 
-      if (!target) return false;
-      target.click();
-      return true;
+  for (let pass = 1; pass <= 20; pass++) {
+    const stats = await page.evaluate(() => {
+      const pattern = /^view\s+\d+\s+repl(y|ies)$/i;
+      const containers = Array.from(
+        document.querySelectorAll('[class*="DivViewRepliesContainer"], [class*="DivViewMoreRepliesWrapper"], [data-e2e*="reply"]')
+      ) as HTMLElement[];
+
+      const candidates: HTMLElement[] = [];
+
+      for (const container of containers) {
+        const text = (container.innerText || container.textContent || '').trim();
+        const rect = container.getBoundingClientRect();
+        const style = window.getComputedStyle(container);
+        const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        if (pattern.test(text) && visible) {
+          candidates.push(container);
+        }
+      }
+
+      const broadTextMatches = Array.from(document.querySelectorAll('button, div, span, p')) as HTMLElement[];
+      for (const el of broadTextMatches) {
+        const text = (el.textContent || '').trim();
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        if (!pattern.test(text) || !visible) continue;
+        if (!candidates.includes(el)) {
+          candidates.push(el);
+        }
+      }
+
+      let clicked = 0;
+      const clickedTexts: string[] = [];
+
+      for (const el of candidates.slice(0, 30)) {
+        const clickable =
+          el.closest('button') as HTMLElement | null ||
+          el.closest('[role="button"]') as HTMLElement | null ||
+          el;
+
+        const label = ((clickable.textContent || el.textContent || '').trim().replace(/\s+/g, ' ')).slice(0, 80);
+        try {
+          clickable.scrollIntoView({ block: 'center', inline: 'nearest' });
+          clickable.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+          clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+          clickable.click();
+          clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+          clicked += 1;
+          clickedTexts.push(label);
+        } catch {
+          // Continue with other candidates.
+        }
+      }
+
+      return {
+        candidateCount: candidates.length,
+        clicked,
+        clickedTexts: clickedTexts.slice(0, 8)
+      };
     });
 
-    if (!clicked) {
+    totalClicks += stats.clicked;
+    console.log(
+      `[Affiliate Worker] Reply expansion pass ${pass}: candidates=${stats.candidateCount}, clicked=${stats.clicked}, sample=${stats.clickedTexts.join(' | ') || 'none'}`
+    );
+
+    if (stats.clicked === 0) {
+      stagnantPasses += 1;
+    } else {
+      stagnantPasses = 0;
+    }
+
+    if (stagnantPasses >= 2) {
       break;
     }
 
-    await delay(350);
+    await delay(500);
   }
+
+  console.log(`[Affiliate Worker] Reply expansion complete: totalClicked=${totalClicks}`);
 }
 
-async function loadAllCommentsForVideo(page: Page): Promise<void> {
+async function loadAllCommentsForVideo(page: Page, maxCollect = 400): Promise<ScrapedComment[]> {
   try {
+    const collectedByKey = new Map<string, ScrapedComment>();
+
+    const collectVisibleComments = async (phase: string): Promise<number> => {
+      const batch = await page.evaluate(() => {
+        const wrappers = Array.from(
+          document.querySelectorAll(
+            '[class*="DivCommentContentWrapper"], [class*="DivCommentItemWrapper"], [data-e2e="comment-item"]'
+          )
+        ) as HTMLElement[];
+
+        const out: Array<{ username: string; userTitle: string; text: string; relativeTime: string; profileUrl: string }> = [];
+
+        for (const wrapper of wrappers) {
+          const usernameLink = wrapper.querySelector('a[href*="/@"]') as HTMLAnchorElement | null;
+          const href = usernameLink?.getAttribute('href') || '';
+          const usernameMatch = href.match(/\/@([^/?#]+)/);
+          const username = usernameMatch?.[1] || '';
+
+          const userTitle =
+            (wrapper.querySelector('[data-e2e^="comment-username"] p') as HTMLElement | null)?.innerText?.trim() ||
+            (usernameLink?.querySelector('p') as HTMLElement | null)?.innerText?.trim() ||
+            (wrapper.querySelector('[data-e2e^="comment-username"]') as HTMLElement | null)?.innerText?.trim() ||
+            '';
+
+          const text =
+            (wrapper.querySelector('[data-e2e="comment-level-1"]') as HTMLElement | null)?.innerText?.trim() ||
+            (wrapper.querySelector('[data-e2e="comment-text"]') as HTMLElement | null)?.innerText?.trim() ||
+            (wrapper.querySelector('span.TUXText') as HTMLElement | null)?.innerText?.trim() ||
+            '';
+
+          const directTime =
+            (wrapper.querySelector('[data-e2e^="comment-time"]') as HTMLElement | null)?.innerText?.trim() ||
+            '';
+
+          let relativeTime = directTime;
+          if (!relativeTime) {
+            const spans = Array.from(wrapper.querySelectorAll('span')) as HTMLElement[];
+            const timeSpan = spans.find((span) => {
+              const t = (span.textContent || '').trim();
+              return (
+                /\d+[smhdw]\s*ago/i.test(t) ||
+                /^(yesterday|just now)$/i.test(t) ||
+                /^\d+\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|week|weeks|mo|month|months|y|yr|year|years)\b/i.test(t) ||
+                /^\d{1,2}-\d{1,2}$/.test(t) ||
+                /^\d{4}-\d{1,2}-\d{1,2}$/.test(t) ||
+                /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}/i.test(t)
+              );
+            });
+            relativeTime = (timeSpan?.textContent || '').trim();
+          }
+
+          if (!username || !text) continue;
+
+          out.push({
+            username,
+            userTitle,
+            text,
+            relativeTime,
+            profileUrl: `https://www.tiktok.com/@${username}`
+          });
+        }
+
+        return out;
+      });
+
+      let added = 0;
+      for (const c of batch) {
+        const key = `${c.username.toLowerCase()}|${c.text.toLowerCase()}|${String(c.relativeTime || '').toLowerCase()}`;
+        if (!collectedByKey.has(key)) {
+          collectedByKey.set(key, c);
+          added += 1;
+        }
+      }
+
+      console.log(`[Affiliate Worker] ${phase}: visible=${batch.length}, addedUnique=${added}, totalUnique=${collectedByKey.size}`);
+      return added;
+    };
+
     const scrollInfo = await page.evaluate(() => {
       const commentsCountEl =
         document.querySelector('[class*="DivCommentCountContainer"]') ||
@@ -987,11 +1130,14 @@ async function loadAllCommentsForVideo(page: Page): Promise<void> {
     const mouseY = Number(scrollInfo.y);
     if (!scrollInfo.found || !Number.isFinite(mouseX) || !Number.isFinite(mouseY)) {
       console.log('[Affiliate Worker] No suitable comment scroll container found; skipping deep scroll');
-      return;
+      return [];
     }
 
     await page.mouse.move(mouseX, mouseY);
     await delay(1200);
+
+    await expandAllCommentReplies(page);
+    await collectVisibleComments('Pre-scroll collect');
 
     let loadedComments = await page.evaluate(() => {
       const level1 = document.querySelectorAll('[data-e2e="comment-level-1"]').length;
@@ -1002,6 +1148,8 @@ async function loadAllCommentsForVideo(page: Page): Promise<void> {
     let attempts = 0;
     let noGrowth = 0;
     let bottomStalls = 0;
+    let zeroUniqueStreak = 0;
+    const recentScrollTops: number[] = [];
     const maxAttempts = 120;
     const target = scrollInfo.totalComments > 0 ? Math.max(scrollInfo.totalComments, loadedComments) : Number.POSITIVE_INFINITY;
     console.log(`[Affiliate Worker] Comment scroll target: ${Number.isFinite(target) ? target : 'unknown/infinite'} (starting at ${loadedComments})`);
@@ -1009,9 +1157,14 @@ async function loadAllCommentsForVideo(page: Page): Promise<void> {
     while (attempts < maxAttempts) {
       attempts += 1;
       const before = loadedComments;
+      const beforeUnique = collectedByKey.size;
 
       await page.mouse.wheel({ deltaY: 800 });
       await delay(2000);
+
+      if (attempts <= 4 || attempts % 5 === 0) {
+        await expandAllCommentReplies(page);
+      }
 
       const stateAfterScroll = await page.evaluate(() => {
         const level1 = document.querySelectorAll('[data-e2e="comment-level-1"]').length;
@@ -1041,9 +1194,23 @@ async function loadAllCommentsForVideo(page: Page): Promise<void> {
       });
 
       loadedComments = stateAfterScroll.loadedComments;
+      const addedInPass = await collectVisibleComments(`Scroll attempt ${attempts} collect`);
+
+      if (addedInPass > 0) {
+        zeroUniqueStreak = 0;
+      } else {
+        zeroUniqueStreak += 1;
+      }
+
+      if (typeof stateAfterScroll.scrollTop === 'number' && Number.isFinite(stateAfterScroll.scrollTop)) {
+        recentScrollTops.push(Math.round(stateAfterScroll.scrollTop));
+        if (recentScrollTops.length > 24) {
+          recentScrollTops.shift();
+        }
+      }
 
       console.log(
-        `[Affiliate Worker] Scroll attempt ${attempts}: comments ${before} -> ${loadedComments} (level1=${stateAfterScroll.level1}, item=${stateAfterScroll.item}, generic=${stateAfterScroll.generic}, scrollTop=${stateAfterScroll.scrollTop}, scrollHeight=${stateAfterScroll.scrollHeight}, clientHeight=${stateAfterScroll.clientHeight})`
+        `[Affiliate Worker] Scroll attempt ${attempts}: comments ${before} -> ${loadedComments} (level1=${stateAfterScroll.level1}, item=${stateAfterScroll.item}, generic=${stateAfterScroll.generic}, scrollTop=${stateAfterScroll.scrollTop}, scrollHeight=${stateAfterScroll.scrollHeight}, clientHeight=${stateAfterScroll.clientHeight}, unique=${beforeUnique} -> ${collectedByKey.size})`
       );
 
       const atBottom =
@@ -1051,7 +1218,11 @@ async function loadAllCommentsForVideo(page: Page): Promise<void> {
         stateAfterScroll.maxScrollTop !== null &&
         stateAfterScroll.scrollTop >= stateAfterScroll.maxScrollTop - 2;
 
-      if (loadedComments > before) {
+      const oscillationWindow = recentScrollTops.slice(-18);
+      const uniqueTopPositions = new Set(oscillationWindow).size;
+      const isTopOscillating = oscillationWindow.length >= 12 && uniqueTopPositions <= 3;
+
+      if (loadedComments > before || addedInPass > 0) {
         noGrowth = 0;
         bottomStalls = 0;
       } else {
@@ -1099,15 +1270,38 @@ async function loadAllCommentsForVideo(page: Page): Promise<void> {
         }
       }
 
+      if (zeroUniqueStreak >= 12 && isTopOscillating) {
+        console.log(
+          `[Affiliate Worker] Stopping comment scroll: zero unique additions for ${zeroUniqueStreak} attempts while scrollTop oscillates across ${uniqueTopPositions} positions`
+        );
+        break;
+      }
+
+      if (zeroUniqueStreak >= 20) {
+        console.log(
+          `[Affiliate Worker] Stopping comment scroll: zero unique additions for ${zeroUniqueStreak} consecutive attempts`
+        );
+        break;
+      }
+
       if (scrollInfo.totalComments > 0 && loadedComments >= scrollInfo.totalComments) {
         console.log('[Affiliate Worker] Reached expected comment count based on UI comment counter');
+        break;
+      }
+
+      if (collectedByKey.size >= maxCollect) {
+        console.log(`[Affiliate Worker] Reached max unique comment collection limit (${maxCollect})`);
         break;
       }
     }
 
     console.log(`[Affiliate Worker] Comment scrolling complete after ${attempts} attempts; loadedComments=${loadedComments}`);
+    const collected = Array.from(collectedByKey.values()).slice(0, maxCollect);
+    console.log(`[Affiliate Worker] Total unique comments collected across scroll passes: ${collected.length}`);
+    return collected;
   } catch (error) {
     console.log('[Affiliate Worker] Comment scrolling failed, continuing with currently loaded comments:', error);
+    return [];
   }
 }
 
@@ -1242,8 +1436,10 @@ async function scrapeVideoCommentsDetailed(page: Page, maxComments = 60): Promis
 
     const timeDiagnostics = commentElements.slice(0, Math.min(max, 10)).map((el: any, index: number) => {
       const wrapper =
+        el.closest('[class*="DivCommentContentWrapper"]') ||
         el.closest('[class*="DivCommentItemWrapper"]') ||
         el.closest('[data-e2e="comment-item"]') ||
+        el.parentElement ||
         el;
 
       const spanTexts = Array.from(wrapper?.querySelectorAll?.('span') || [])
@@ -1276,6 +1472,7 @@ async function scrapeVideoCommentsDetailed(page: Page, maxComments = 60): Promis
     const comments = commentElements.map((el: any) => {
       try {
         const wrapper =
+          el.closest('[class*="DivCommentContentWrapper"]') ||
           el.closest('[class*="DivCommentItemWrapper"]') ||
           el.closest('[class*="DivContentContainer"]') ||
           el.closest('[data-e2e="comment-item"]') ||
@@ -1291,6 +1488,7 @@ async function scrapeVideoCommentsDetailed(page: Page, maxComments = 60): Promis
           usernameContainer?.querySelector('a');
 
         let commentUsername = '';
+        let commentUserTitle = '';
         if (usernameLink) {
           // Extract username from href like "/@username" or "/user/username"
           const href = usernameLink.getAttribute('href');
@@ -1300,6 +1498,11 @@ async function scrapeVideoCommentsDetailed(page: Page, maxComments = 60): Promis
               commentUsername = match[1]; // Get username without @
             }
           }
+
+          commentUserTitle =
+            (usernameLink.querySelector('p') as HTMLElement | null)?.innerText?.trim() ||
+            (usernameContainer.querySelector('p') as HTMLElement | null)?.innerText?.trim() ||
+            '';
         }
 
         // Fallback to text content if href extraction failed
@@ -1307,6 +1510,12 @@ async function scrapeVideoCommentsDetailed(page: Page, maxComments = 60): Promis
           commentUsername =
             usernameContainer?.textContent?.trim().replace('@', '') ||
             (usernameContainer?.querySelector('a p') || usernameContainer?.querySelector('p'))?.textContent?.trim().replace('@', '') ||
+            '';
+        }
+
+        if (!commentUserTitle) {
+          commentUserTitle =
+            (usernameContainer.querySelector('p') as HTMLElement | null)?.innerText?.trim() ||
             '';
         }
 
@@ -1354,6 +1563,7 @@ async function scrapeVideoCommentsDetailed(page: Page, maxComments = 60): Promis
 
         return {
           username: commentUsername,
+          userTitle: commentUserTitle,
           text: commentText,
           likes: commentLikes,
           relativeTime,
@@ -2269,7 +2479,7 @@ async function processProspect(
     await openCommentsPanel(page);
     await delay(1200);
     await expandAllCommentReplies(page);
-    await loadAllCommentsForVideo(page);
+    const collectedDuringScroll = await loadAllCommentsForVideo(page, 400);
 
     const preScrapeCounts = await page.evaluate(() => {
       const level1 = document.querySelectorAll('[data-e2e="comment-level-1"]').length;
@@ -2280,11 +2490,15 @@ async function processProspect(
     console.log('[Affiliate Worker] Pre-scrape comment element counts:', preScrapeCounts);
 
     const content = await scrapeVideoContent(page, 10);
-    const detailedComments = await scrapeVideoCommentsDetailed(page, 400);
+    const detailedComments =
+      collectedDuringScroll.length > 0 ? collectedDuringScroll : await scrapeVideoCommentsDetailed(page, 400);
+    if (collectedDuringScroll.length > 0) {
+      console.log(`[Affiliate Worker] Using ${collectedDuringScroll.length} comments collected during scroll pass`);
+    }
     console.log(`[Affiliate Worker] scrapeVideoCommentsDetailed() collected ${detailedComments.length} comments`);
     detailedComments.slice(0, 50).forEach((comment, index) => {
       console.log(
-        `[Affiliate Worker] Comment ${index + 1}: @${comment.username} | ${comment.relativeTime} | ${comment.text.substring(0, 120)}`
+        `[Affiliate Worker] Comment ${index + 1}: @${comment.username}${comment.userTitle ? ` (${comment.userTitle})` : ''} | ${comment.relativeTime} | ${comment.text.substring(0, 120)}`
       );
     });
     caption = content.caption || '';

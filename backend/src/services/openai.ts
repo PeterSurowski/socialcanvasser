@@ -76,8 +76,8 @@ For each comment, respond in this EXACT JSON format (no other text):
     {
       "username": "username1",
       "hasBuyingIntent": true,
-      "customizedDM": "Hey [name]! I saw your comment about [specific thing]. I totally get it - [relate to their situation]. [Your solution/offer]. I'm happy to share my experiences, if you're interested!",
-      "customizedReply": "I can help with that! 😊 Sending you a message"
+      "customizedDM": "",
+      "customizedReply": ""
     },
     {
       "username": "username2",
