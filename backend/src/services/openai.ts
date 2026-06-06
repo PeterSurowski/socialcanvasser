@@ -76,13 +76,11 @@ For each comment, respond in this EXACT JSON format (no other text):
     {
       "username": "username1",
       "hasBuyingIntent": true,
-      "customizedDM": "",
       "customizedReply": ""
     },
     {
       "username": "username2",
       "hasBuyingIntent": false,
-      "customizedDM": "",
       "customizedReply": ""
     }
   ]

@@ -992,28 +992,39 @@ async function loadAllCommentsForVideo(page: Page, maxCollect = 400): Promise<Sc
 
     const collectVisibleComments = async (phase: string): Promise<number> => {
       const batch = await page.evaluate(() => {
-        const wrappers = Array.from(
-          document.querySelectorAll(
-            '[class*="DivCommentContentWrapper"], [class*="DivCommentItemWrapper"], [data-e2e="comment-item"]'
-          )
+        const commentTextEls = Array.from(
+          document.querySelectorAll('[data-e2e^="comment-level-"]')
         ) as HTMLElement[];
 
         const out: Array<{ username: string; userTitle: string; text: string; relativeTime: string; profileUrl: string }> = [];
 
-        for (const wrapper of wrappers) {
+        for (const textEl of commentTextEls) {
+          const wrapper =
+            textEl.closest('[class*="DivCommentContentContainer"]') ||
+            textEl.closest('[class*="DivCommentItemContainer"]') ||
+            textEl.closest('[data-comment-ui-enabled="true"]') ||
+            textEl.closest('[class*="DivCommentContentWrapper"]') ||
+            textEl.closest('[class*="DivCommentItemWrapper"]') ||
+            textEl.closest('[data-e2e="comment-item"]') ||
+            textEl.parentElement ||
+            textEl;
+
           const usernameLink = wrapper.querySelector('a[href*="/@"]') as HTMLAnchorElement | null;
           const href = usernameLink?.getAttribute('href') || '';
           const usernameMatch = href.match(/\/@([^/?#]+)/);
           const username = usernameMatch?.[1] || '';
 
           const userTitle =
+            (wrapper.querySelector('[data-e2e^="comment-username-"]') as HTMLElement | null)?.innerText?.trim() ||
             (wrapper.querySelector('[data-e2e^="comment-username"] p') as HTMLElement | null)?.innerText?.trim() ||
             (usernameLink?.querySelector('p') as HTMLElement | null)?.innerText?.trim() ||
             (wrapper.querySelector('[data-e2e^="comment-username"]') as HTMLElement | null)?.innerText?.trim() ||
             '';
 
           const text =
+            textEl?.innerText?.trim() ||
             (wrapper.querySelector('[data-e2e="comment-level-1"]') as HTMLElement | null)?.innerText?.trim() ||
+            (wrapper.querySelector('[data-e2e="comment-level-2"]') as HTMLElement | null)?.innerText?.trim() ||
             (wrapper.querySelector('[data-e2e="comment-text"]') as HTMLElement | null)?.innerText?.trim() ||
             (wrapper.querySelector('span.TUXText') as HTMLElement | null)?.innerText?.trim() ||
             '';
@@ -1136,8 +1147,22 @@ async function loadAllCommentsForVideo(page: Page, maxCollect = 400): Promise<Sc
     await page.mouse.move(mouseX, mouseY);
     await delay(1200);
 
+    await page.evaluate(() => {
+      const containers = Array.from(
+        document.querySelectorAll('[class*="DivCommentListContainer"], [class*="DivCommentMain"], [class*="DivScrollingContentContainer"]')
+      ) as HTMLElement[];
+      const container = containers.find((el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.width > 150 && rect.height > 150;
+      }) as HTMLElement | undefined;
+
+      if (!container) return;
+      container.scrollTop = 0;
+    });
+    await delay(1000);
+
     await expandAllCommentReplies(page);
-    await collectVisibleComments('Pre-scroll collect');
+    await collectVisibleComments('Pre-scroll collect (top anchor)');
 
     let loadedComments = await page.evaluate(() => {
       const level1 = document.querySelectorAll('[data-e2e="comment-level-1"]').length;
@@ -1146,27 +1171,19 @@ async function loadAllCommentsForVideo(page: Page, maxCollect = 400): Promise<Sc
       return Math.max(level1, item, generic);
     });
     let attempts = 0;
-    let noGrowth = 0;
-    let bottomStalls = 0;
     let zeroUniqueStreak = 0;
-    const recentScrollTops: number[] = [];
-    const maxAttempts = 120;
+    let noMovementStreak = 0;
+    let direction: 1 | -1 = 1;
+    let edgeBounces = 0;
+    const maxAttempts = 180;
     const target = scrollInfo.totalComments > 0 ? Math.max(scrollInfo.totalComments, loadedComments) : Number.POSITIVE_INFINITY;
     console.log(`[Affiliate Worker] Comment scroll target: ${Number.isFinite(target) ? target : 'unknown/infinite'} (starting at ${loadedComments})`);
 
     while (attempts < maxAttempts) {
       attempts += 1;
-      const before = loadedComments;
       const beforeUnique = collectedByKey.size;
 
-      await page.mouse.wheel({ deltaY: 800 });
-      await delay(2000);
-
-      if (attempts <= 4 || attempts % 5 === 0) {
-        await expandAllCommentReplies(page);
-      }
-
-      const stateAfterScroll = await page.evaluate(() => {
+      const stateAfterScroll = await page.evaluate((dir) => {
         const level1 = document.querySelectorAll('[data-e2e="comment-level-1"]').length;
         const item = document.querySelectorAll('[data-e2e="comment-item"]').length;
         const generic = document.querySelectorAll('div[class*="CommentItem"], div[class*="comment-item"]').length;
@@ -1178,23 +1195,59 @@ async function loadAllCommentsForVideo(page: Page, maxCollect = 400): Promise<Sc
           return rect.width > 150 && rect.height > 150;
         }) as HTMLElement | undefined;
 
+        if (!container) {
+          return {
+            loadedComments: Math.max(level1, item, generic),
+            level1,
+            item,
+            generic,
+            moved: 0,
+            scrollTop: null,
+            maxScrollTop: null,
+            scrollHeight: null,
+            clientHeight: null,
+            atTop: false,
+            atBottom: false
+          };
+        }
+
+        const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+        const step = Math.max(260, Math.floor(container.clientHeight * 0.72));
+        const prevTop = container.scrollTop;
+        const targetTop = Math.max(0, Math.min(maxScrollTop, prevTop + dir * step));
+
+        container.scrollTop = targetTop;
+        const nextTop = container.scrollTop;
+        const moved = Math.abs(nextTop - prevTop);
+
         return {
           loadedComments: Math.max(level1, item, generic),
           level1,
           item,
           generic,
-          scrollTop: container?.scrollTop ?? null,
-          maxScrollTop:
-            container && Number.isFinite(container.scrollHeight - container.clientHeight)
-              ? container.scrollHeight - container.clientHeight
-              : null,
-          scrollHeight: container?.scrollHeight ?? null,
-          clientHeight: container?.clientHeight ?? null
+          moved,
+          step,
+          scrollTop: nextTop,
+          maxScrollTop,
+          scrollHeight: container.scrollHeight,
+          clientHeight: container.clientHeight,
+          atTop: nextTop <= 2,
+          atBottom: nextTop >= maxScrollTop - 2
         };
-      });
+      }, direction);
+
+      await delay(1200);
+
+      if (attempts <= 6 || attempts % 4 === 0) {
+        await expandAllCommentReplies(page);
+      }
 
       loadedComments = stateAfterScroll.loadedComments;
       const addedInPass = await collectVisibleComments(`Scroll attempt ${attempts} collect`);
+
+      console.log(
+        `[Affiliate Worker] Scroll attempt ${attempts}: dir=${direction > 0 ? 'down' : 'up'}, moved=${stateAfterScroll.moved}, comments=${loadedComments} (level1=${stateAfterScroll.level1}, item=${stateAfterScroll.item}, generic=${stateAfterScroll.generic}, scrollTop=${stateAfterScroll.scrollTop}, maxScrollTop=${stateAfterScroll.maxScrollTop}, unique=${beforeUnique} -> ${collectedByKey.size})`
+      );
 
       if (addedInPass > 0) {
         zeroUniqueStreak = 0;
@@ -1202,95 +1255,69 @@ async function loadAllCommentsForVideo(page: Page, maxCollect = 400): Promise<Sc
         zeroUniqueStreak += 1;
       }
 
-      if (typeof stateAfterScroll.scrollTop === 'number' && Number.isFinite(stateAfterScroll.scrollTop)) {
-        recentScrollTops.push(Math.round(stateAfterScroll.scrollTop));
-        if (recentScrollTops.length > 24) {
-          recentScrollTops.shift();
-        }
-      }
-
-      console.log(
-        `[Affiliate Worker] Scroll attempt ${attempts}: comments ${before} -> ${loadedComments} (level1=${stateAfterScroll.level1}, item=${stateAfterScroll.item}, generic=${stateAfterScroll.generic}, scrollTop=${stateAfterScroll.scrollTop}, scrollHeight=${stateAfterScroll.scrollHeight}, clientHeight=${stateAfterScroll.clientHeight}, unique=${beforeUnique} -> ${collectedByKey.size})`
-      );
-
-      const atBottom =
-        stateAfterScroll.scrollTop !== null &&
-        stateAfterScroll.maxScrollTop !== null &&
-        stateAfterScroll.scrollTop >= stateAfterScroll.maxScrollTop - 2;
-
-      const oscillationWindow = recentScrollTops.slice(-18);
-      const uniqueTopPositions = new Set(oscillationWindow).size;
-      const isTopOscillating = oscillationWindow.length >= 12 && uniqueTopPositions <= 3;
-
-      if (loadedComments > before || addedInPass > 0) {
-        noGrowth = 0;
-        bottomStalls = 0;
+      if ((stateAfterScroll.moved ?? 0) < 3) {
+        noMovementStreak += 1;
       } else {
-        noGrowth += 1;
-
-        if (atBottom) {
-          bottomStalls += 1;
-
-          // Nudge up and back down to trigger next virtualized page load.
-          await page.evaluate(() => {
-            const containers = Array.from(
-              document.querySelectorAll('[class*="DivCommentListContainer"], [class*="DivCommentMain"], [class*="DivScrollingContentContainer"]')
-            ) as HTMLElement[];
-            const container = containers.find((el) => {
-              const rect = el.getBoundingClientRect();
-              return rect.width > 150 && rect.height > 150;
-            }) as HTMLElement | undefined;
-
-            if (!container) return;
-            container.scrollTop = Math.max(0, container.scrollTop - Math.max(220, Math.floor(container.clientHeight * 0.35)));
-          });
-          await delay(700);
-
-          await page.evaluate(() => {
-            const containers = Array.from(
-              document.querySelectorAll('[class*="DivCommentListContainer"], [class*="DivCommentMain"], [class*="DivScrollingContentContainer"]')
-            ) as HTMLElement[];
-            const container = containers.find((el) => {
-              const rect = el.getBoundingClientRect();
-              return rect.width > 150 && rect.height > 150;
-            }) as HTMLElement | undefined;
-
-            if (!container) return;
-            container.scrollTop = Math.min(
-              container.scrollHeight,
-              container.scrollTop + Math.max(420, Math.floor(container.clientHeight * 0.75))
-            );
-          });
-          await delay(900);
-        }
-
-        if (noGrowth >= 10 && bottomStalls >= 4) {
-          console.log('[Affiliate Worker] Stopping comment scroll: virtualized list appears exhausted (no growth with repeated bottom stalls)');
-          break;
-        }
+        noMovementStreak = 0;
       }
 
-      if (zeroUniqueStreak >= 12 && isTopOscillating) {
-        console.log(
-          `[Affiliate Worker] Stopping comment scroll: zero unique additions for ${zeroUniqueStreak} attempts while scrollTop oscillates across ${uniqueTopPositions} positions`
-        );
+      if (stateAfterScroll.atBottom && direction === 1) {
+        direction = -1;
+        edgeBounces += 1;
+        console.log(`[Affiliate Worker] Hit bottom edge; reversing sweep to up (edgeBounces=${edgeBounces})`);
+      } else if (stateAfterScroll.atTop && direction === -1) {
+        direction = 1;
+        edgeBounces += 1;
+        console.log(`[Affiliate Worker] Hit top edge; reversing sweep to down (edgeBounces=${edgeBounces})`);
+      }
+
+      if (zeroUniqueStreak > 0 && zeroUniqueStreak % 6 === 0) {
+        await page.evaluate((dir) => {
+          const containers = Array.from(
+            document.querySelectorAll('[class*="DivCommentListContainer"], [class*="DivCommentMain"], [class*="DivScrollingContentContainer"]')
+          ) as HTMLElement[];
+          const container = containers.find((el) => {
+            const rect = el.getBoundingClientRect();
+            return rect.width > 150 && rect.height > 150;
+          }) as HTMLElement | undefined;
+
+          if (!container) return;
+          const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+          const jitter = Math.max(120, Math.floor(container.clientHeight * 0.28));
+          const first = Math.max(0, Math.min(maxScrollTop, container.scrollTop - dir * jitter));
+          container.scrollTop = first;
+          const second = Math.max(0, Math.min(maxScrollTop, first + dir * Math.floor(jitter * 1.8)));
+          container.scrollTop = second;
+        }, direction);
+        await delay(800);
+        await expandAllCommentReplies(page);
+        await collectVisibleComments(`Jitter collect after attempt ${attempts}`);
+      }
+
+      if (scrollInfo.totalComments > 0 && collectedByKey.size >= scrollInfo.totalComments) {
+        console.log('[Affiliate Worker] Reached expected unique comment count based on UI comment counter');
         break;
       }
 
-      if (zeroUniqueStreak >= 20) {
-        console.log(
-          `[Affiliate Worker] Stopping comment scroll: zero unique additions for ${zeroUniqueStreak} consecutive attempts`
-        );
-        break;
-      }
-
-      if (scrollInfo.totalComments > 0 && loadedComments >= scrollInfo.totalComments) {
-        console.log('[Affiliate Worker] Reached expected comment count based on UI comment counter');
+      if (scrollInfo.totalComments > 0 && collectedByKey.size >= Math.floor(scrollInfo.totalComments * 0.92)) {
+        console.log('[Affiliate Worker] Reached near-complete unique coverage (>=92% of UI comment counter)');
         break;
       }
 
       if (collectedByKey.size >= maxCollect) {
         console.log(`[Affiliate Worker] Reached max unique comment collection limit (${maxCollect})`);
+        break;
+      }
+
+      if (edgeBounces >= 6 && zeroUniqueStreak >= 16 && noMovementStreak >= 4) {
+        console.log(
+          `[Affiliate Worker] Stopping comment scroll: exhausted after multi-edge sweeps (edgeBounces=${edgeBounces}, zeroUniqueStreak=${zeroUniqueStreak}, noMovementStreak=${noMovementStreak})`
+        );
+        break;
+      }
+
+      if (zeroUniqueStreak >= 30) {
+        console.log(`[Affiliate Worker] Stopping comment scroll: zero unique additions for ${zeroUniqueStreak} consecutive attempts`);
         break;
       }
     }
