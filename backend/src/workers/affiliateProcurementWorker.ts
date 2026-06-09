@@ -2649,6 +2649,8 @@ async function processProspect(
           exampleDM: groupConfig.exampleDM,
           exampleComment: groupConfig.exampleComment,
           openaiApiKey: config.openaiApiKey
+        }, {
+          includeDmGeneration: false
         });
 
         console.log(`[Affiliate Worker] OpenAI returned ${buyingIntentResults.length} buying-intent results`);
@@ -2969,6 +2971,13 @@ export async function runAffiliateProcurementForAccounts(userId: number): Promis
     const idx = accounts.findIndex(a => a.id === state.lastAccountId);
     if (idx !== -1) {
       accountCursor = (idx + 1) % accounts.length;
+    } else {
+      // Saved account may now be paused/snoozed/inactive; resume from the next available id.
+      const fallbackIdx = accounts.findIndex(a => a.id > state.lastAccountId!);
+      accountCursor = fallbackIdx !== -1 ? fallbackIdx : 0;
+      console.log(
+        `[Affiliate Worker] Saved last account ${state.lastAccountId} is unavailable; resuming from @${accounts[accountCursor].account_identifier}`
+      );
     }
   }
 

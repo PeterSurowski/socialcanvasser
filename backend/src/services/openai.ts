@@ -26,52 +26,37 @@ interface UserConfig {
 export async function analyzeCommentsForBuyingIntent(
   comments: Comment[],
   videoUrl: string,
-  userConfig: UserConfig
+  userConfig: UserConfig,
+  options?: {
+    includeDmGeneration?: boolean;
+  }
 ): Promise<BuyingIntentResult[]> {
   
   const openai = new OpenAI({
     apiKey: userConfig.openaiApiKey
   });
 
+  const includeDmGeneration = options?.includeDmGeneration !== false;
+
   // Build the prompt
-  const systemPrompt = `You are an expert at identifying buying intent in social media comments and crafting personalized outreach messages.
-
-Your task:
-1. Identify which comments express buying intent:
-   - Asking where to buy or how to get started
-   - Expressing desire for the product/solution
-   - Asking about pricing, availability, or details
-   - Showing frustration with current situation (looking for solutions)
-   - Asking "how?", "where?", "can I?", "does this work?"
-   
-2. For EVERY comment with buying intent, you MUST create BOTH:
-   - A customized DM (warm, helpful, personal - can be longer)
-   - A customized comment reply (MAX 150 characters - short and engaging)
-
-User's Business Context:
-${userConfig.aiPrompt}
-
-The following is guidance on crafting DM messages:
-${userConfig.exampleDM}
-
-The following is guidance on crafting comment replies (this must be 150 characters or less):
-${userConfig.exampleComment}
-
-CRITICAL RULES:
-- If hasBuyingIntent is true, you MUST provide BOTH customizedDM and customizedReply
-- If hasBuyingIntent is false, set customizedDM and customizedReply to empty strings
-- Comment replies are LIMITED to 150 characters maximum - count carefully!
-- Personalize based on what the commenter actually said
-- Be conversational and helpful, not pushy or salesy
-- Reference something specific from their comment when possible`;
-
-  const userPrompt = `Video URL: ${videoUrl}
-
-Comments to analyze:
-${comments.map((c, i) => `${i + 1}. @${c.username} (${c.relativeTime}): "${c.text}"`).join('\n')}
-
-For each comment, respond in this EXACT JSON format (no other text):
-{
+  const responseExample = includeDmGeneration
+    ? `{
+  "results": [
+    {
+      "username": "username1",
+      "hasBuyingIntent": true,
+      "customizedDM": "",
+      "customizedReply": ""
+    },
+    {
+      "username": "username2",
+      "hasBuyingIntent": false,
+      "customizedDM": "",
+      "customizedReply": ""
+    }
+  ]
+}`
+    : `{
   "results": [
     {
       "username": "username1",
@@ -84,14 +69,83 @@ For each comment, respond in this EXACT JSON format (no other text):
       "customizedReply": ""
     }
   ]
-}
+}`;
 
-REQUIREMENTS:
+  const generationRequirement = includeDmGeneration
+    ? `2. For EVERY comment with buying intent, you MUST create BOTH:
+   - A customized DM (warm, helpful, personal - can be longer)
+   - A customized comment reply (MAX 150 characters - short and engaging)`
+    : `2. For EVERY comment with buying intent, you MUST create:
+   - A customized comment reply (MAX 150 characters - short and engaging)`;
+
+  const dmGuidance = includeDmGeneration
+    ? `
+The following is guidance on crafting DM messages:
+${userConfig.exampleDM}
+`
+    : '';
+
+  const criticalRules = includeDmGeneration
+    ? `CRITICAL RULES:
+- If hasBuyingIntent is true, you MUST provide BOTH customizedDM and customizedReply
+- If hasBuyingIntent is false, set customizedDM and customizedReply to empty strings
+- Comment replies are LIMITED to 150 characters maximum - count carefully!
+- Personalize based on what the commenter actually said
+- Be conversational and helpful, not pushy or salesy
+- Reference something specific from their comment when possible`
+    : `CRITICAL RULES:
+- If hasBuyingIntent is true, you MUST provide a non-empty customizedReply
+- If hasBuyingIntent is false, set customizedReply to empty string
+- Comment replies are LIMITED to 150 characters maximum - count carefully!
+- Personalize based on what the commenter actually said
+- Be conversational and helpful, not pushy or salesy
+- Reference something specific from their comment when possible`;
+
+  const requirements = includeDmGeneration
+    ? `REQUIREMENTS:
 - Always return a "results" array, even for one comment
 - If hasBuyingIntent is true: MUST include non-empty customizedDM and customizedReply
 - If hasBuyingIntent is false: set both to empty strings ""
 - customizedReply must be 150 characters or less (count carefully!)
+- Make messages personal by referencing the actual comment content`
+    : `REQUIREMENTS:
+- Always return a "results" array, even for one comment
+- If hasBuyingIntent is true: MUST include non-empty customizedReply
+- If hasBuyingIntent is false: set customizedReply to empty string ""
+- customizedReply must be 150 characters or less (count carefully!)
 - Make messages personal by referencing the actual comment content`;
+
+  const systemPrompt = `You are an expert at identifying buying intent in social media comments and crafting personalized outreach messages.
+
+Your task:
+1. Identify which comments express buying intent:
+   - Asking where to buy or how to get started
+   - Expressing desire for the product/solution
+   - Asking about pricing, availability, or details
+   - Showing frustration with current situation (looking for solutions)
+   - Asking "how?", "where?", "can I?", "does this work?"
+   
+${generationRequirement}
+
+User's Business Context:
+${userConfig.aiPrompt}
+
+${dmGuidance}
+
+The following is guidance on crafting comment replies (this must be 150 characters or less):
+${userConfig.exampleComment}
+
+${criticalRules}`;
+
+  const userPrompt = `Video URL: ${videoUrl}
+
+Comments to analyze:
+${comments.map((c, i) => `${i + 1}. @${c.username} (${c.relativeTime}): "${c.text}"`).join('\n')}
+
+For each comment, respond in this EXACT JSON format (no other text):
+${responseExample}
+
+${requirements}`;
 
   try {
     console.log(`[OpenAI] Sending ${comments.length} comments to OpenAI for buying intent analysis...`);
@@ -155,7 +209,9 @@ REQUIREMENTS:
     parsed.forEach((r: any) => {
       if (r.hasBuyingIntent) {
         console.log(`  - @${r.username}: Intent detected`);
-        console.log(`    DM: "${r.customizedDM?.substring(0, 80)}..."`);
+        if (includeDmGeneration) {
+          console.log(`    DM: "${r.customizedDM?.substring(0, 80)}..."`);
+        }
         console.log(`    Reply: "${r.customizedReply}"`);
       }
     });
