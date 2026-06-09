@@ -667,321 +667,266 @@ export async function postCommentReply(
       console.log(`[Engagement] ⚠️ Timeout waiting for comments, continuing anyway...`);
     }
     
-    // CRITICAL: Scroll comments with mouse hover to load ALL comments before searching for target user
-    console.log(`[Engagement] 📜 Scrolling comments to load all comments...`);
-    
-    // Get total comment count and container position
+    // Scroll/search strategy: try immediate username-scoped click, then sweep up and down.
+    console.log(`[Engagement] 📜 Locating @${targetUsername} and clicking the Reply button on that exact comment...`);
+
     const scrollInfo = await page.evaluate(() => {
-      // CRITICAL: Detect browser zoom level
-      // When browser is zoomed out, all coordinates are scaled by the zoom factor
       const zoom = window.devicePixelRatio || 1;
       const computedZoom = parseFloat(getComputedStyle(document.body).zoom || '1');
       const effectiveZoom = zoom / computedZoom;
-      
-      console.log(`[Browser] Zoom level: ${effectiveZoom} (devicePixelRatio: ${zoom}, body zoom: ${computedZoom})`);
-      
-      // Get total comment count from the UI
+
       const commentsCountEl = document.querySelector('[class*="DivCommentCountContainer"]') ||
                              document.querySelector('[data-e2e="comment-count"]') ||
                              document.querySelector('[data-e2e="browse-comment-count"]') ||
                              document.querySelector('[class*="comment-count"]') ||
                              document.querySelector('[class*="CommentCount"]');
       const totalComments = parseInt(commentsCountEl?.textContent?.replace(/[^0-9]/g, '') || '0', 10);
-      
-      // CRITICAL: Find the COMMENTS panel scrollable container, NOT the video sidebar
-      // Look for the actual comment list container with the specific class pattern
+
       const containers = Array.from(document.querySelectorAll('[class*="DivCommentListContainer"], [class*="DivCommentMain"], [class*="DivScrollingContentContainer"]'));
-      
-      console.log(`[Browser] Found ${containers.length} potential comment containers`);
-      
       const container = containers.find(el => {
         const rect = el.getBoundingClientRect();
-        // Comments panel is wider (typically 300-400px), video sidebar is narrow (~72px)
-        // With zoom, dimensions scale accordingly
-        const hasGoodDimensions = rect.width > 150 && rect.height > 150;
-        
-        if (hasGoodDimensions) {
-          console.log(`[Browser] Container candidate:`, {
-            class: el.className.substring(0, 50),
-            width: rect.width,
-            height: rect.height,
-            left: rect.left,
-            top: rect.top
-          });
-        }
-        
-        return hasGoodDimensions;
+        return rect.width > 150 && rect.height > 150;
       }) as HTMLElement | undefined;
-      
-      if (container) {
-        const rect = container.getBoundingClientRect();
-        
-        // Position mouse in the center horizontally
-        const x = rect.left + rect.width / 2;
-        
-        // Position mouse in visible area vertically
-        // Account for any scroll offset and keep within viewport
-        const viewportHeight = window.innerHeight;
-        const safeTopOffset = 200; // pixels from top of container
-        const y = Math.min(rect.top + safeTopOffset, viewportHeight * 0.6);
-        
-        console.log(`[Browser] Selected container:`, {
-          class: container.className,
-          rectLeft: rect.left,
-          rectTop: rect.top,
-          rectWidth: rect.width,
-          rectHeight: rect.height,
-          calculatedX: x,
-          calculatedY: y,
-          viewportHeight: viewportHeight
-        });
-        
-        return {
-          found: true,
-          x: x,
-          y: y,
-          totalComments,
-          zoom: effectiveZoom,
-          containerClass: container.className,
-          rectInfo: { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
-        };
-      }
-      
-      console.log(`[Browser] ❌ No suitable comment container found`);
-      return { found: false, totalComments, zoom: effectiveZoom };
-    });
-    
-    console.log(`[Engagement] 📊 Total comments on video: ${scrollInfo.totalComments}`);
-    console.log(`[Engagement] 🔍 Browser zoom level: ${scrollInfo.zoom || 'unknown'}`);
-    
-    if (scrollInfo.found) {
-      console.log(`[Engagement] ✅ Scrollable container found: ${scrollInfo.containerClass?.substring(0, 60)}...`);
-      console.log(`[Engagement] 📐 Container rect:`, scrollInfo.rectInfo);
-      console.log(`[Engagement] 🖱️ Calculated mouse position: (${Math.round(scrollInfo.x)}, ${Math.round(scrollInfo.y)})`);
-      
-      // Move mouse to hover over the SCROLLABLE container
-      await page.mouse.move(scrollInfo.x, scrollInfo.y);
-      console.log(`[Engagement] ✅ Mouse positioned over comments section`);
-      await new Promise(resolve => setTimeout(resolve, 1500)); // Give time for hover to register
-      
-      let loadedComments = 0;
-      let scrollAttempts = 0;
-      const maxScrollAttempts = 50; // Safety limit
-      let noChangeCount = 0;
-      
-      // Keep scrolling until we've loaded all comments
-      while (loadedComments < scrollInfo.totalComments && scrollAttempts < maxScrollAttempts) {
-        scrollAttempts++;
-        
-        const beforeCount = loadedComments;
-        
-        // Use Puppeteer's trusted mouse wheel event (mouse already positioned over scrollable container)
-        await page.mouse.wheel({ deltaY: 800 });
-        
-        // Wait 2 seconds for TikTok's lazy loading (takes about 1 second to load new comments)
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
-        // Count after scrolling
-        loadedComments = await page.evaluate(() => {
-          return document.querySelectorAll('[data-e2e="comment-level-1"]').length;
-        });
-        
-        const increased = loadedComments > beforeCount;
-        const percentage = Math.round((loadedComments / scrollInfo.totalComments) * 100);
-        console.log(`[Engagement] 🔄 Scroll ${scrollAttempts}: ${beforeCount} → ${loadedComments}/${scrollInfo.totalComments} (${percentage}%) ${increased ? '✅ (NEW!)' : '⚠️ (no change)'}`);
-        
-        // Stop if we've loaded all comments
-        if (loadedComments >= scrollInfo.totalComments) {
-          console.log(`[Engagement] ✅ All comments loaded! (${loadedComments}/${scrollInfo.totalComments})`);
-          break;
-        }
-        
-        // Track consecutive failures - be more patient (5 attempts instead of 3)
-        if (!increased) {
-          noChangeCount++;
-          if (noChangeCount >= 5) {
-            console.log(`[Engagement] ⚠️ No new comments after ${noChangeCount} scroll attempts - stopping at ${loadedComments}/${scrollInfo.totalComments} (${percentage}%)`);
-            break;
-          }
-        } else {
-          noChangeCount = 0; // Reset on success
-        }
-      }
-      
-      if (scrollAttempts >= maxScrollAttempts) {
-        console.log(`[Engagement] ⚠️ Reached max scroll attempts (${maxScrollAttempts}), proceeding with ${loadedComments} comments loaded`);
-      }
-      
-      console.log(`[Engagement] ✅ Scrolling complete, now searching for @${targetUsername}...`);
-    } else {
-      console.log(`[Engagement] ⚠️ Could not find comments container for scrolling, proceeding with search...`);
-    }
-    
-    // Find the specific comment from targetUsername
-    const targetCommentIndex = await page.evaluate((username) => {
-      // CRITICAL: [data-e2e="comment-level-1"] is a SPAN with just the comment text
-      // We need the parent DIV that contains the full comment structure (username link + text + actions)
-      const commentTextSpans = Array.from(document.querySelectorAll('[data-e2e="comment-level-1"]'));
-      
-      // Navigate up to find the DivCommentContentWrapper container
-      const comments = commentTextSpans.map(span => {
-        // Go up to parent DIV (usually DivCommentContentWrapper)
-        let container = span.parentElement;
-        // Look for a DIV with "Comment" in the class name
-        while (container && (!container.className || !container.className.includes('Comment'))) {
-          container = container.parentElement;
-        }
-        return container || span.parentElement;
-      }).filter(el => el !== null);
-      
-      console.log(`[Browser] Searching ${comments.length} comments for @${username}...`);
-      console.log(`[Browser] Comment container class names:`, comments.slice(0, 2).map(c => c?.className?.substring(0, 50)).join(' | '));
 
-      const foundUsernames: string[] = []; // Track all found usernames for debugging
-      
-      // Find the comment from this specific user
-      for (let i = 0; i < comments.length; i++) {
-        const comment = comments[i];
-        if (!comment) continue;
-        
-        // Try multiple methods to find the username
-        let commentUsername = '';
-        
-        // Method 1: Look for ANY <a> tag with href containing /@
-        const allLinks = comment.querySelectorAll('a[href*="/@"]');
-        if (allLinks.length > 0) {
-          // Get the FIRST link (should be the username link)
-          const firstLink = allLinks[0] as HTMLAnchorElement;
-          const href = firstLink.getAttribute('href') || '';
-          const match = href.match(/\/@([^/?]+)/);
-          if (match) {
-            commentUsername = match[1];
-          }
-        }
-        
-        // Method 2: Look for username in data-e2e="comment-username-*" wrapper (alternative)
-        if (!commentUsername) {
-          const usernameWrapper = comment.querySelector('[data-e2e="comment-username-1"]');
-          if (usernameWrapper) {
-            const link = usernameWrapper.querySelector('a[href*="/@"]');
-            if (link) {
-              const href = link.getAttribute('href') || '';
-              const match = href.match(/\/@([^/?]+)/);
-              if (match) {
-                commentUsername = match[1];
-              }
-            }
-          }
-        }
-        
-        // Clean up the username
-        commentUsername = commentUsername.replace('@', '').trim().toLowerCase();
-        foundUsernames.push(commentUsername);
-        
-        if (commentUsername && commentUsername === username.toLowerCase()) {
-          console.log(`[Browser] ✅ Found @${username} at comment index ${i}`);
-          return i; // Return the index of the matching comment
-        }
+      if (!container) {
+        return { found: false, totalComments, zoom: effectiveZoom };
       }
-      
-      console.log(`[Browser] ❌ Could not find @${username} in any of the ${comments.length} comments`);
-      console.log(`[Browser] 📋 Found usernames:`, foundUsernames.slice(0, 10).join(', '));
-      return -1; // Not found
-    }, targetUsername);
-    
-    if (targetCommentIndex === -1) {
-      console.log(`[Engagement] ❌ Could not find comment from @${targetUsername}`);
-      return { success: false, error: `Comment from @${targetUsername} not found on page` };
-    }
-    
-    console.log(`[Engagement] ✅ Found @${targetUsername}'s comment at index ${targetCommentIndex}`);
-    
-    const replyButtonInfo = await page.evaluate(() => {
-      // First, try to find reply buttons with data-e2e attribute (e.g., data-e2e="comment-reply-1")
-      let replyButtons = Array.from(document.querySelectorAll('[data-e2e^="comment-reply"]'));
-      
-      // Fallback: look for <p> elements with role="button" and "Reply" text inside DivReplyTriggerWrapper
-      const replyWrappers = Array.from(document.querySelectorAll('[class*="DivReplyTriggerWrapper"]'));
-      const replyParagraphs = Array.from(document.querySelectorAll('p.TUXText[role="button"][aria-label="Reply"]'));
-      
-      // Also look for any elements with "Reply" text
-      const allElements = Array.from(document.querySelectorAll('[role="button"]'));
-      const replyTextButtons = allElements.filter(el => el.textContent?.trim() === 'Reply');
-      
-      // DIAGNOSTICS: What DO we have on the page?
-      const allComments = document.querySelectorAll('[data-e2e="comment-level-1"]');
-      const allDataE2E = Array.from(document.querySelectorAll('[data-e2e]')).map(el => el.getAttribute('data-e2e'));
-      const allRoleButtons = Array.from(document.querySelectorAll('[role="button"]')).map(el => el.textContent?.trim());
-      
+
+      const rect = container.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = Math.min(rect.top + 200, window.innerHeight * 0.6);
+
       return {
-        dataE2ECount: replyButtons.length,
-        wrapperCount: replyWrappers.length,
-        replyParagraphCount: replyParagraphs.length,
-        textButtonCount: replyTextButtons.length,
-        diagnostics: {
-          totalComments: allComments.length,
-          dataE2EAttributes: allDataE2E.slice(0, 30),
-          roleButtonTexts: allRoleButtons.slice(0, 15)
-        }
+        found: true,
+        x,
+        y,
+        totalComments,
+        zoom: effectiveZoom,
+        containerClass: container.className,
+        rectInfo: { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
       };
     });
-    
-    console.log(`[Engagement] Reply button search results:`, replyButtonInfo);
-    console.log(`[Engagement]   - Found ${replyButtonInfo.dataE2ECount} buttons with [data-e2e^="comment-reply"]`);
-    console.log(`[Engagement]   - Found ${replyButtonInfo.wrapperCount} DivReplyTriggerWrapper elements`);
-    console.log(`[Engagement]   - Found ${replyButtonInfo.replyParagraphCount} <p> tags with aria-label="Reply"`);
-    console.log(`[Engagement]   - Found ${replyButtonInfo.textButtonCount} role="button" elements with "Reply" text`);
-    
-    if (replyButtonInfo.diagnostics) {
-      console.log(`[Engagement] 🔍 DIAGNOSTICS:`);
-      console.log(`  - Total comments on page: ${replyButtonInfo.diagnostics.totalComments}`);
-      console.log(`  - data-e2e attributes:`, replyButtonInfo.diagnostics.dataE2EAttributes);
-      console.log(`  - role="button" texts:`, replyButtonInfo.diagnostics.roleButtonTexts);
+
+    console.log(`[Engagement] 📊 Total comments on video: ${scrollInfo.totalComments}`);
+    console.log(`[Engagement] 🔍 Browser zoom level: ${scrollInfo.zoom || 'unknown'}`);
+
+    if (scrollInfo.found) {
+      await page.mouse.move(scrollInfo.x, scrollInfo.y);
+      console.log(`[Engagement] ✅ Mouse positioned over comments section`);
+      await new Promise(resolve => setTimeout(resolve, 1200));
+    } else {
+      console.log(`[Engagement] ⚠️ Could not find comments container, will still attempt visible-comment match`);
     }
-    
-    const replyClicked = await page.evaluate((commentIndex) => {
-      // Method 1: Try data-e2e attribute (e.g., data-e2e="comment-reply-1")
-      let replyButtons = Array.from(document.querySelectorAll('[data-e2e^="comment-reply"]'));
-      
-      if (replyButtons.length > commentIndex) {
-        const targetReply = replyButtons[commentIndex] as HTMLElement;
-        targetReply.click();
-        return { success: true, method: 'data-e2e attribute' };
+
+    const tryClickReplyForUser = async (): Promise<{ success: boolean; method?: string; visibleCount: number; foundUsernames: string[] }> => {
+      return page.evaluate((username) => {
+        const normalizedTarget = String(username || '').replace(/^@/, '').trim().toLowerCase();
+
+        const commentTextSpans = Array.from(document.querySelectorAll('[data-e2e="comment-level-1"]'));
+        const commentContainers = commentTextSpans.map(span => {
+          let container: Element | null = span.parentElement;
+          while (container && !(container.className || '').toString().includes('Comment')) {
+            container = container.parentElement;
+          }
+          return container || span.parentElement;
+        }).filter(Boolean) as Element[];
+
+        const foundUsernames: string[] = [];
+
+        for (const comment of commentContainers) {
+          const userLink = comment.querySelector('a[href*="/@"]') as HTMLAnchorElement | null;
+          const href = userLink?.getAttribute('href') || '';
+          const usernameMatch = href.match(/\/@([^/?]+)/);
+          const found = String(usernameMatch?.[1] || '').replace(/^@/, '').trim().toLowerCase();
+          if (found) {
+            foundUsernames.push(found);
+          }
+
+          if (!found || found !== normalizedTarget) {
+            continue;
+          }
+
+          // Click Reply only within this matched comment container.
+          const inContainerReply = comment.querySelector('[data-e2e^="comment-reply"], p.TUXText[role="button"][aria-label="Reply"], [class*="DivReplyTriggerWrapper"] [role="button"]') as HTMLElement | null;
+          if (inContainerReply) {
+            inContainerReply.click();
+            return { success: true, method: 'scoped-to-matched-comment', visibleCount: commentContainers.length, foundUsernames };
+          }
+
+          // Last fallback: find nearest role button with Reply text inside this comment.
+          const replyRoleButton = Array.from(comment.querySelectorAll('[role="button"]')).find(el => el.textContent?.trim() === 'Reply') as HTMLElement | undefined;
+          if (replyRoleButton) {
+            replyRoleButton.click();
+            return { success: true, method: 'scoped-role-button', visibleCount: commentContainers.length, foundUsernames };
+          }
+
+          return { success: false, method: 'matched-user-no-reply-control', visibleCount: commentContainers.length, foundUsernames };
+        }
+
+        return { success: false, visibleCount: commentContainers.length, foundUsernames };
+      }, targetUsername);
+    };
+
+    const attemptedExpansionControls = new Set<string>();
+    const expandVisibleReplyThreads = async (): Promise<{ candidates: number; clicked: number; sample: string[] }> => {
+      const candidates = await page.evaluate(() => {
+        const pattern = /^view\s+\d+\s+(repl(y|ies)|more)$/i;
+        const results: Array<{ key: string; label: string }> = [];
+        const seenKeys = new Set<string>();
+        const seenTargets = new Set<HTMLElement>();
+
+        const all = Array.from(document.querySelectorAll('button, [role="button"], div, span, p')) as HTMLElement[];
+        for (const el of all) {
+          const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
+          if (!pattern.test(text)) continue;
+
+          const clickable =
+            (el.closest('button') as HTMLElement | null) ||
+            (el.closest('[role="button"]') as HTMLElement | null) ||
+            null;
+
+          if (!clickable || seenTargets.has(clickable)) continue;
+
+          const rect = clickable.getBoundingClientRect();
+          const style = window.getComputedStyle(clickable);
+          const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+          if (!visible) continue;
+
+          const commentRoot =
+            clickable.closest('[data-e2e="comment-item"]') ||
+            clickable.closest('[data-comment-ui-enabled="true"]') ||
+            clickable.closest('[class*="DivCommentItemContainer"]');
+
+          const anchorHref = (commentRoot?.querySelector('a[href*="/@"]') as HTMLAnchorElement | null)?.getAttribute('href') || '';
+          const commentAnchor = commentRoot?.getAttribute('data-e2e') || anchorHref || 'unknown';
+          const rootFingerprint = ((commentRoot?.textContent || '').trim().replace(/\s+/g, ' ')).slice(0, 64).toLowerCase();
+          const key = `${text.toLowerCase()}|${commentAnchor}|${rootFingerprint}`;
+
+          if (seenKeys.has(key)) continue;
+          seenKeys.add(key);
+          seenTargets.add(clickable);
+          results.push({ key, label: text.slice(0, 80) });
+        }
+
+        return results.slice(0, 12);
+      });
+
+      let clicked = 0;
+      const sample: string[] = [];
+
+      for (const candidate of candidates) {
+        if (attemptedExpansionControls.has(candidate.key)) {
+          continue;
+        }
+
+        const clickResult = await page.evaluate((targetKey) => {
+          const pattern = /^view\s+\d+\s+(repl(y|ies)|more)$/i;
+          const all = Array.from(document.querySelectorAll('button, [role="button"], div, span, p')) as HTMLElement[];
+
+          for (const el of all) {
+            const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
+            if (!pattern.test(text)) continue;
+
+            const target =
+              (el.closest('button') as HTMLElement | null) ||
+              (el.closest('[role="button"]') as HTMLElement | null) ||
+              null;
+            if (!target) continue;
+
+            const rect = target.getBoundingClientRect();
+            const style = window.getComputedStyle(target);
+            const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+            if (!visible) continue;
+
+            const commentRoot =
+              target.closest('[data-e2e="comment-item"]') ||
+              target.closest('[data-comment-ui-enabled="true"]') ||
+              target.closest('[class*="DivCommentItemContainer"]');
+
+            const anchorHref = (commentRoot?.querySelector('a[href*="/@"]') as HTMLAnchorElement | null)?.getAttribute('href') || '';
+            const commentAnchor = commentRoot?.getAttribute('data-e2e') || anchorHref || 'unknown';
+            const rootFingerprint = ((commentRoot?.textContent || '').trim().replace(/\s+/g, ' ')).slice(0, 64).toLowerCase();
+            const key = `${text.toLowerCase()}|${commentAnchor}|${rootFingerprint}`;
+            if (key !== targetKey) continue;
+
+            try {
+              const before = (target.innerText || target.textContent || '').trim().replace(/\s+/g, ' ');
+              target.click();
+              return { clicked: true, label: before.slice(0, 80) };
+            } catch {
+              return { clicked: false, label: text.slice(0, 80) };
+            }
+          }
+
+          return { clicked: false, label: '' };
+        }, candidate.key);
+
+        attemptedExpansionControls.add(candidate.key);
+        if (!clickResult.clicked) {
+          continue;
+        }
+
+        clicked += 1;
+        sample.push(clickResult.label || candidate.label);
+        await new Promise(resolve => setTimeout(resolve, 1000 + Math.floor(Math.random() * 1200)));
       }
-      
-      // Method 2: Try <p> tag with aria-label="Reply" (matches actual HTML)
-      const replyParagraphs = Array.from(document.querySelectorAll('p.TUXText[role="button"][aria-label="Reply"]'));
-      if (replyParagraphs.length > commentIndex) {
-        (replyParagraphs[commentIndex] as HTMLElement).click();
-        return { success: true, method: 'p[aria-label="Reply"]' };
+
+      return { candidates: candidates.length, clicked, sample };
+    };
+
+    let replyClicked = await tryClickReplyForUser();
+    console.log(`[Engagement] Initial scoped reply lookup:`, replyClicked);
+
+    if (!replyClicked.success && scrollInfo.found) {
+      const initialExpansion = await expandVisibleReplyThreads();
+      if (initialExpansion.clicked > 0) {
+        console.log(
+          `[Engagement] Expanded visible reply threads before sweep: candidates=${initialExpansion.candidates}, clicked=${initialExpansion.clicked}, sample=${initialExpansion.sample.join(' | ') || 'none'}`
+        );
+        await new Promise(resolve => setTimeout(resolve, 900));
+        replyClicked = await tryClickReplyForUser();
+        console.log(`[Engagement] Post-expansion scoped reply lookup:`, replyClicked);
       }
-      
-      // Method 3: Look inside DivReplyTriggerWrapper for <p> with "Reply" text
-      const replyWrappers = Array.from(document.querySelectorAll('[class*="DivReplyTriggerWrapper"]'));
-      if (replyWrappers.length > commentIndex) {
-        const targetWrapper = replyWrappers[commentIndex];
-        const replyText = targetWrapper.querySelector('p[role="button"]') as HTMLElement;
-        if (replyText && replyText.textContent?.trim() === 'Reply') {
-          replyText.click();
-          return { success: true, method: 'DivReplyTriggerWrapper > p' };
+
+      const directionPlan = [
+        { name: 'up', deltaY: -900, attempts: 16 },
+        { name: 'down', deltaY: 900, attempts: 30 }
+      ];
+
+      for (const phase of directionPlan) {
+        console.log(`[Engagement] 🔄 Scanning comments (${phase.name}) for @${targetUsername}...`);
+        for (let i = 1; i <= phase.attempts; i++) {
+          await page.mouse.wheel({ deltaY: phase.deltaY });
+          await new Promise(resolve => setTimeout(resolve, 1200));
+
+          if (i % 3 === 0) {
+            const expansionResult = await expandVisibleReplyThreads();
+            if (expansionResult.clicked > 0) {
+              console.log(
+                `[Engagement]   ${phase.name} expansion after sweep ${i}: candidates=${expansionResult.candidates}, clicked=${expansionResult.clicked}, sample=${expansionResult.sample.join(' | ') || 'none'}`
+              );
+              await new Promise(resolve => setTimeout(resolve, 900));
+            }
+          }
+
+          replyClicked = await tryClickReplyForUser();
+          console.log(`[Engagement]   ${phase.name} sweep ${i}/${phase.attempts}: visible=${replyClicked.visibleCount}, success=${replyClicked.success}`);
+
+          if (replyClicked.success) {
+            break;
+          }
+        }
+
+        if (replyClicked.success) {
+          break;
         }
       }
-      
-      // Method 4: Any role="button" with "Reply" text (collect all, then select by index)
-      const allElements = Array.from(document.querySelectorAll('[role="button"]'));
-      const replyTextButtons = allElements.filter(el => el.textContent?.trim() === 'Reply');
-      if (replyTextButtons.length > commentIndex) {
-        (replyTextButtons[commentIndex] as HTMLElement).click();
-        return { success: true, method: 'role="button" with Reply text' };
-      }
-      
-      return { success: false };
-    }, targetCommentIndex);
-    
+    }
+
     console.log(`[Engagement] Reply button click result:`, replyClicked);
     
     if (!replyClicked.success) {
-      console.log(`[Engagement] ❌ Could not find or click Reply button - tried all methods`);
+      console.log(`[Engagement] ❌ Could not find @${targetUsername} with a clickable Reply control after bidirectional scan`);
       return { success: false, error: 'Reply button not found' };
     }
     

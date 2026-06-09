@@ -95,16 +95,23 @@ REQUIREMENTS:
 
   try {
     console.log(`[OpenAI] Sending ${comments.length} comments to OpenAI for buying intent analysis...`);
-    
-    const completion = await openai.chat.completions.create({
+
+    const requestPayload = {
       model: 'gpt-4o-mini', // Cost-effective for this task
       messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
+        { role: 'system' as const, content: systemPrompt },
+        { role: 'user' as const, content: userPrompt }
       ],
       temperature: 0.7,
-      response_format: { type: 'json_object' }
-    });
+      response_format: { type: 'json_object' as const }
+    };
+
+    // Debug logging for full OpenAI request/response payloads.
+    console.log(`[OpenAI] Full request payload (buying-intent):\n${JSON.stringify(requestPayload, null, 2)}`);
+
+    const completion = await openai.chat.completions.create(requestPayload);
+
+    console.log(`[OpenAI] Full response payload (buying-intent):\n${JSON.stringify(completion, null, 2)}`);
 
     const responseText = completion.choices[0].message.content;
     if (!responseText) {

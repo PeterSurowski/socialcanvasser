@@ -900,77 +900,153 @@ async function openCommentsPanel(page: Page): Promise<void> {
   }
 }
 
-async function expandAllCommentReplies(page: Page): Promise<void> {
+async function expandAllCommentReplies(page: Page, attemptedControls?: Set<string>): Promise<void> {
   let totalClicks = 0;
   let stagnantPasses = 0;
+  const attempted = attemptedControls ?? new Set<string>();
 
   for (let pass = 1; pass <= 20; pass++) {
-    const stats = await page.evaluate(() => {
-      const pattern = /^view\s+\d+\s+repl(y|ies)$/i;
-      const containers = Array.from(
-        document.querySelectorAll('[class*="DivViewRepliesContainer"], [class*="DivViewMoreRepliesWrapper"], [data-e2e*="reply"]')
-      ) as HTMLElement[];
+    const candidates = await page.evaluate(() => {
+      const pattern = /^view\s+\d+\s+(repl(y|ies)|more)$/i;
+      const results: Array<{ key: string; label: string }> = [];
+      const seenKeys = new Set<string>();
+      const seenTargets = new Set<HTMLElement>();
 
-      const candidates: HTMLElement[] = [];
+      const all = Array.from(document.querySelectorAll('button, [role="button"], div, span, p')) as HTMLElement[];
+      for (const el of all) {
+        const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
+        if (!pattern.test(text)) continue;
 
-      for (const container of containers) {
-        const text = (container.innerText || container.textContent || '').trim();
-        const rect = container.getBoundingClientRect();
-        const style = window.getComputedStyle(container);
-        const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-        if (pattern.test(text) && visible) {
-          candidates.push(container);
-        }
-      }
-
-      const broadTextMatches = Array.from(document.querySelectorAll('button, div, span, p')) as HTMLElement[];
-      for (const el of broadTextMatches) {
-        const text = (el.textContent || '').trim();
-        const rect = el.getBoundingClientRect();
-        const style = window.getComputedStyle(el);
-        const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-        if (!pattern.test(text) || !visible) continue;
-        if (!candidates.includes(el)) {
-          candidates.push(el);
-        }
-      }
-
-      let clicked = 0;
-      const clickedTexts: string[] = [];
-
-      for (const el of candidates.slice(0, 30)) {
         const clickable =
-          el.closest('button') as HTMLElement | null ||
-          el.closest('[role="button"]') as HTMLElement | null ||
-          el;
+          (el.closest('button') as HTMLElement | null) ||
+          (el.closest('[role="button"]') as HTMLElement | null) ||
+          null;
 
-        const label = ((clickable.textContent || el.textContent || '').trim().replace(/\s+/g, ' ')).slice(0, 80);
-        try {
-          clickable.scrollIntoView({ block: 'center', inline: 'nearest' });
-          clickable.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-          clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-          clickable.click();
-          clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-          clicked += 1;
-          clickedTexts.push(label);
-        } catch {
-          // Continue with other candidates.
-        }
+        // Skip text-only nodes; only interact with explicit clickable controls.
+        if (!clickable) continue;
+        if (seenTargets.has(clickable)) continue;
+
+        const rect = clickable.getBoundingClientRect();
+        const style = window.getComputedStyle(clickable);
+        const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        if (!visible) continue;
+
+        const commentRoot =
+          clickable.closest('[data-e2e="comment-item"]') ||
+          clickable.closest('[data-comment-ui-enabled="true"]') ||
+          clickable.closest('[class*="DivCommentItemContainer"]');
+
+        const anchorHref = (commentRoot?.querySelector('a[href*="/@"]') as HTMLAnchorElement | null)?.getAttribute('href') || '';
+        const commentAnchor = commentRoot?.getAttribute('data-e2e') || anchorHref || 'unknown';
+        const rootFingerprint = ((commentRoot?.textContent || '').trim().replace(/\s+/g, ' ')).slice(0, 64).toLowerCase();
+        const key = `${text.toLowerCase()}|${commentAnchor}|${rootFingerprint}`;
+
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        seenTargets.add(clickable);
+
+        results.push({
+          key,
+          label: text.slice(0, 80)
+        });
       }
 
-      return {
-        candidateCount: candidates.length,
-        clicked,
-        clickedTexts: clickedTexts.slice(0, 8)
-      };
+      return results.slice(0, 20);
     });
 
-    totalClicks += stats.clicked;
+    let clickedThisPass = 0;
+    const clickedTexts: string[] = [];
+
+    for (const candidate of candidates) {
+      if (attempted.has(candidate.key)) {
+        continue;
+      }
+
+      const clickResult = await page.evaluate((targetKey) => {
+        const pattern = /^view\s+\d+\s+(repl(y|ies)|more)$/i;
+        const all = Array.from(document.querySelectorAll('button, [role="button"], div, span, p')) as HTMLElement[];
+
+        for (const el of all) {
+          const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
+          if (!pattern.test(text)) continue;
+
+          const target =
+            (el.closest('button') as HTMLElement | null) ||
+            (el.closest('[role="button"]') as HTMLElement | null) ||
+            null;
+
+          if (!target) continue;
+
+          const rect = target.getBoundingClientRect();
+          const style = window.getComputedStyle(target);
+          const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+          if (!visible) continue;
+
+          const commentRoot =
+            target.closest('[data-e2e="comment-item"]') ||
+            target.closest('[data-comment-ui-enabled="true"]') ||
+            target.closest('[class*="DivCommentItemContainer"]');
+
+          const anchorHref = (commentRoot?.querySelector('a[href*="/@"]') as HTMLAnchorElement | null)?.getAttribute('href') || '';
+          const commentAnchor = commentRoot?.getAttribute('data-e2e') || anchorHref || 'unknown';
+          const rootFingerprint = ((commentRoot?.textContent || '').trim().replace(/\s+/g, ' ')).slice(0, 64).toLowerCase();
+          const key = `${text.toLowerCase()}|${commentAnchor}|${rootFingerprint}`;
+
+          if (key !== targetKey) continue;
+
+          try {
+            const before = (target.innerText || target.textContent || '').trim().replace(/\s+/g, ' ');
+            const inView = rect.top >= 0 && rect.bottom <= window.innerHeight;
+            if (!inView) {
+              target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+            }
+            target.click();
+
+            // Only treat as successful if control state changes after click.
+            const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+            return wait(750).then(() => {
+              const after = (target.innerText || target.textContent || '').trim().replace(/\s+/g, ' ');
+              const changed = !pattern.test(after) || after.toLowerCase() !== before.toLowerCase();
+
+              return {
+                clicked: changed,
+                label: before.slice(0, 80)
+              };
+            });
+          } catch {
+            return {
+              clicked: false,
+              label: text.slice(0, 80)
+            };
+          }
+        }
+
+        return {
+          clicked: false,
+          label: ''
+        };
+      }, candidate.key);
+
+      if (!clickResult.clicked) {
+        continue;
+      }
+
+      attempted.add(candidate.key);
+
+      clickedThisPass += 1;
+      totalClicks += 1;
+      clickedTexts.push(clickResult.label || candidate.label);
+
+      // Human-like pacing between expansion clicks to reduce anti-bot re-render behavior.
+      const humanDelayMs = 1000 + Math.floor(Math.random() * 2001);
+      await delay(humanDelayMs);
+    }
+
     console.log(
-      `[Affiliate Worker] Reply expansion pass ${pass}: candidates=${stats.candidateCount}, clicked=${stats.clicked}, sample=${stats.clickedTexts.join(' | ') || 'none'}`
+      `[Affiliate Worker] Reply expansion pass ${pass}: candidates=${candidates.length}, clicked=${clickedThisPass}, attempted=${attempted.size}, sample=${clickedTexts.slice(0, 8).join(' | ') || 'none'}`
     );
 
-    if (stats.clicked === 0) {
+    if (clickedThisPass === 0) {
       stagnantPasses += 1;
     } else {
       stagnantPasses = 0;
@@ -980,7 +1056,7 @@ async function expandAllCommentReplies(page: Page): Promise<void> {
       break;
     }
 
-    await delay(500);
+    await delay(700);
   }
 
   console.log(`[Affiliate Worker] Reply expansion complete: totalClicked=${totalClicks}`);
@@ -989,6 +1065,7 @@ async function expandAllCommentReplies(page: Page): Promise<void> {
 async function loadAllCommentsForVideo(page: Page, maxCollect = 400): Promise<ScrapedComment[]> {
   try {
     const collectedByKey = new Map<string, ScrapedComment>();
+    const attemptedReplyControls = new Set<string>();
 
     const collectVisibleComments = async (phase: string): Promise<number> => {
       const batch = await page.evaluate(() => {
@@ -1161,7 +1238,7 @@ async function loadAllCommentsForVideo(page: Page, maxCollect = 400): Promise<Sc
     });
     await delay(1000);
 
-    await expandAllCommentReplies(page);
+    await expandAllCommentReplies(page, attemptedReplyControls);
     await collectVisibleComments('Pre-scroll collect (top anchor)');
 
     let loadedComments = await page.evaluate(() => {
@@ -1172,18 +1249,25 @@ async function loadAllCommentsForVideo(page: Page, maxCollect = 400): Promise<Sc
     });
     let attempts = 0;
     let zeroUniqueStreak = 0;
-    let noMovementStreak = 0;
-    let direction: 1 | -1 = 1;
-    let edgeBounces = 0;
-    const maxAttempts = 180;
+    let noProgressStreak = 0;
+    let bottomNoProgressStreak = 0;
+    const maxAttempts = 140;
     const target = scrollInfo.totalComments > 0 ? Math.max(scrollInfo.totalComments, loadedComments) : Number.POSITIVE_INFINITY;
     console.log(`[Affiliate Worker] Comment scroll target: ${Number.isFinite(target) ? target : 'unknown/infinite'} (starting at ${loadedComments})`);
 
     while (attempts < maxAttempts) {
       attempts += 1;
       const beforeUnique = collectedByKey.size;
+      const beforeLoaded = loadedComments;
 
-      const stateAfterScroll = await page.evaluate((dir) => {
+      await page.mouse.move(mouseX + (Math.random() * 18 - 9), mouseY + (Math.random() * 12 - 6));
+      await delay(160 + Math.floor(Math.random() * 220));
+
+      const wheelDelta = 120 + Math.floor(Math.random() * 140);
+      await page.mouse.wheel({ deltaY: wheelDelta });
+      await delay(3800 + Math.floor(Math.random() * 1100));
+
+      const stateAfterScroll = await page.evaluate(() => {
         const level1 = document.querySelectorAll('[data-e2e="comment-level-1"]').length;
         const item = document.querySelectorAll('[data-e2e="comment-item"]').length;
         const generic = document.querySelectorAll('div[class*="CommentItem"], div[class*="comment-item"]').length;
@@ -1201,52 +1285,39 @@ async function loadAllCommentsForVideo(page: Page, maxCollect = 400): Promise<Sc
             level1,
             item,
             generic,
-            moved: 0,
             scrollTop: null,
             maxScrollTop: null,
             scrollHeight: null,
             clientHeight: null,
-            atTop: false,
             atBottom: false
           };
         }
 
         const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
-        const step = Math.max(260, Math.floor(container.clientHeight * 0.72));
-        const prevTop = container.scrollTop;
-        const targetTop = Math.max(0, Math.min(maxScrollTop, prevTop + dir * step));
-
-        container.scrollTop = targetTop;
-        const nextTop = container.scrollTop;
-        const moved = Math.abs(nextTop - prevTop);
+        const top = container.scrollTop;
 
         return {
           loadedComments: Math.max(level1, item, generic),
           level1,
           item,
           generic,
-          moved,
-          step,
-          scrollTop: nextTop,
+          scrollTop: top,
           maxScrollTop,
           scrollHeight: container.scrollHeight,
           clientHeight: container.clientHeight,
-          atTop: nextTop <= 2,
-          atBottom: nextTop >= maxScrollTop - 2
+          atBottom: top >= maxScrollTop - 2
         };
-      }, direction);
+      });
 
-      await delay(1200);
-
-      if (attempts <= 6 || attempts % 4 === 0) {
-        await expandAllCommentReplies(page);
+      if (attempts <= 3 || attempts % 5 === 0) {
+        await expandAllCommentReplies(page, attemptedReplyControls);
       }
 
       loadedComments = stateAfterScroll.loadedComments;
       const addedInPass = await collectVisibleComments(`Scroll attempt ${attempts} collect`);
 
       console.log(
-        `[Affiliate Worker] Scroll attempt ${attempts}: dir=${direction > 0 ? 'down' : 'up'}, moved=${stateAfterScroll.moved}, comments=${loadedComments} (level1=${stateAfterScroll.level1}, item=${stateAfterScroll.item}, generic=${stateAfterScroll.generic}, scrollTop=${stateAfterScroll.scrollTop}, maxScrollTop=${stateAfterScroll.maxScrollTop}, unique=${beforeUnique} -> ${collectedByKey.size})`
+        `[Affiliate Worker] Scroll attempt ${attempts}: wheelDelta=${wheelDelta}, comments ${beforeLoaded} -> ${loadedComments} (level1=${stateAfterScroll.level1}, item=${stateAfterScroll.item}, generic=${stateAfterScroll.generic}, scrollTop=${stateAfterScroll.scrollTop}, maxScrollTop=${stateAfterScroll.maxScrollTop}, unique=${beforeUnique} -> ${collectedByKey.size})`
       );
 
       if (addedInPass > 0) {
@@ -1255,42 +1326,23 @@ async function loadAllCommentsForVideo(page: Page, maxCollect = 400): Promise<Sc
         zeroUniqueStreak += 1;
       }
 
-      if ((stateAfterScroll.moved ?? 0) < 3) {
-        noMovementStreak += 1;
+      const progressed = loadedComments > beforeLoaded || addedInPass > 0;
+      if (progressed) {
+        noProgressStreak = 0;
+        bottomNoProgressStreak = 0;
       } else {
-        noMovementStreak = 0;
+        noProgressStreak += 1;
+        if (stateAfterScroll.atBottom) {
+          bottomNoProgressStreak += 1;
+        }
       }
 
-      if (stateAfterScroll.atBottom && direction === 1) {
-        direction = -1;
-        edgeBounces += 1;
-        console.log(`[Affiliate Worker] Hit bottom edge; reversing sweep to up (edgeBounces=${edgeBounces})`);
-      } else if (stateAfterScroll.atTop && direction === -1) {
-        direction = 1;
-        edgeBounces += 1;
-        console.log(`[Affiliate Worker] Hit top edge; reversing sweep to down (edgeBounces=${edgeBounces})`);
-      }
-
-      if (zeroUniqueStreak > 0 && zeroUniqueStreak % 6 === 0) {
-        await page.evaluate((dir) => {
-          const containers = Array.from(
-            document.querySelectorAll('[class*="DivCommentListContainer"], [class*="DivCommentMain"], [class*="DivScrollingContentContainer"]')
-          ) as HTMLElement[];
-          const container = containers.find((el) => {
-            const rect = el.getBoundingClientRect();
-            return rect.width > 150 && rect.height > 150;
-          }) as HTMLElement | undefined;
-
-          if (!container) return;
-          const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
-          const jitter = Math.max(120, Math.floor(container.clientHeight * 0.28));
-          const first = Math.max(0, Math.min(maxScrollTop, container.scrollTop - dir * jitter));
-          container.scrollTop = first;
-          const second = Math.max(0, Math.min(maxScrollTop, first + dir * Math.floor(jitter * 1.8)));
-          container.scrollTop = second;
-        }, direction);
-        await delay(800);
-        await expandAllCommentReplies(page);
+      if (zeroUniqueStreak > 0 && zeroUniqueStreak % 8 === 0) {
+        await page.mouse.move(mouseX, mouseY);
+        await delay(150 + Math.floor(Math.random() * 250));
+        await page.mouse.wheel({ deltaY: Math.floor(wheelDelta * 0.6) });
+        await delay(900 + Math.floor(Math.random() * 700));
+        await expandAllCommentReplies(page, attemptedReplyControls);
         await collectVisibleComments(`Jitter collect after attempt ${attempts}`);
       }
 
@@ -1309,10 +1361,15 @@ async function loadAllCommentsForVideo(page: Page, maxCollect = 400): Promise<Sc
         break;
       }
 
-      if (edgeBounces >= 6 && zeroUniqueStreak >= 16 && noMovementStreak >= 4) {
+      if (stateAfterScroll.atBottom && bottomNoProgressStreak >= 8) {
         console.log(
-          `[Affiliate Worker] Stopping comment scroll: exhausted after multi-edge sweeps (edgeBounces=${edgeBounces}, zeroUniqueStreak=${zeroUniqueStreak}, noMovementStreak=${noMovementStreak})`
+          `[Affiliate Worker] Stopping comment scroll: at bottom with no progress for ${bottomNoProgressStreak} consecutive attempts`
         );
+        break;
+      }
+
+      if (noProgressStreak >= 16) {
+        console.log(`[Affiliate Worker] Stopping comment scroll: no progress for ${noProgressStreak} consecutive attempts`);
         break;
       }
 
@@ -2596,48 +2653,95 @@ async function processProspect(
 
         console.log(`[Affiliate Worker] OpenAI returned ${buyingIntentResults.length} buying-intent results`);
 
-        for (const result of buyingIntentResults) {
-          const matched = recentComments.find((c) => c.username.toLowerCase() === String(result.username || '').toLowerCase());
+        // Process in bottom-to-top order so reply attempts start near the current scroll position.
+        const orderedResults = buyingIntentResults
+          .map((result) => {
+            const username = String(result.username || '').toLowerCase();
+            const matchIndex = recentComments.findIndex((c) => c.username.toLowerCase() === username);
+            return { result, matchIndex };
+          })
+          .filter((entry) => entry.matchIndex >= 0)
+          .sort((a, b) => b.matchIndex - a.matchIndex);
+
+        const actionableResults = orderedResults.filter((entry) => entry.result.hasBuyingIntent);
+        const nonIntentCount = orderedResults.length - actionableResults.length;
+
+        console.log(
+          `[Affiliate Worker] Reply processing order: bottom-to-top (${actionableResults.length} actionable replies, ${nonIntentCount} non-intent comments)`
+        );
+
+        let replyPostedCount = 0;
+        let replySkippedCount = 0;
+        let replyFailedCount = 0;
+
+        for (let replyQueueIndex = 0; replyQueueIndex < actionableResults.length; replyQueueIndex++) {
+          const { result, matchIndex } = actionableResults[replyQueueIndex];
+          const matched = recentComments[matchIndex];
           if (!matched) continue;
 
-          if (result.hasBuyingIntent) {
+          console.log(
+            `[Affiliate Worker] Reply queue ${replyQueueIndex + 1}/${actionableResults.length}: @${matched.username}`
+          );
+
+          try {
             await upsertProspectWithType(userId, matched.username, matched.profileUrl, 'prospective_customer');
 
             const replyText = String(result.customizedReply || '').trim();
-            if (replyText) {
-              const alreadyContacted = await hasContactedUser(userId, matched.username);
-              if (!alreadyContacted) {
-                const replyResult = await postCommentReply(page, targetVideoUrl, replyText, matched.username);
-                if (replyResult.success) {
-                  await recordContact(userId, matched.username, 'comment', account.id, targetVideoUrl);
-                  await logActivity(
-                    userId,
-                    account.id,
-                    'comment_posted',
-                    matched.username,
-                    targetVideoUrl,
-                    replyText,
-                    true
-                  );
-                  await addProspectEdsByUsername(userId, matched.username, 1);
-                } else {
-                  await logActivity(
-                    userId,
-                    account.id,
-                    'comment_posted',
-                    matched.username,
-                    targetVideoUrl,
-                    replyText,
-                    false,
-                    replyResult.error
-                  );
-                }
-              }
+            if (!replyText) {
+              replySkippedCount += 1;
+              console.log(`[Affiliate Worker] Skipping @${matched.username}: empty customized reply`);
+              continue;
             }
-          } else {
-            await upsertProspectWithType(userId, matched.username, matched.profileUrl, 'status_unknown');
+
+            const alreadyContacted = await hasContactedUser(userId, matched.username);
+            if (alreadyContacted) {
+              replySkippedCount += 1;
+              console.log(`[Affiliate Worker] Skipping @${matched.username}: already contacted`);
+              continue;
+            }
+
+            const replyResult = await postCommentReply(page, targetVideoUrl, replyText, matched.username);
+            if (replyResult.success) {
+              await recordContact(userId, matched.username, 'comment', account.id, targetVideoUrl);
+              await logActivity(
+                userId,
+                account.id,
+                'comment_posted',
+                matched.username,
+                targetVideoUrl,
+                replyText,
+                true
+              );
+              await addProspectEdsByUsername(userId, matched.username, 1);
+              replyPostedCount += 1;
+            } else {
+              await logActivity(
+                userId,
+                account.id,
+                'comment_posted',
+                matched.username,
+                targetVideoUrl,
+                replyText,
+                false,
+                replyResult.error
+              );
+              replyFailedCount += 1;
+              console.log(
+                `[Affiliate Worker] Reply failed for @${matched.username}; continuing to next queued comment: ${replyResult.error || 'unknown error'}`
+              );
+            }
+          } catch (replyError) {
+            replyFailedCount += 1;
+            console.log(
+              `[Affiliate Worker] Reply queue error for @${matched.username}; continuing:`,
+              replyError
+            );
           }
         }
+
+        console.log(
+          `[Affiliate Worker] Reply queue complete: posted=${replyPostedCount}, skipped=${replySkippedCount}, failed=${replyFailedCount}, actionable=${actionableResults.length}, nonIntent=${nonIntentCount}, totalMatched=${orderedResults.length}`
+        );
       } catch (error) {
         console.log('[Affiliate Worker] Buying intent analysis failed:', error);
       }
