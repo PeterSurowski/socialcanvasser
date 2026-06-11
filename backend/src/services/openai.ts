@@ -1,4 +1,27 @@
 import OpenAI from 'openai';
+import { HttpsProxyAgent } from 'https-proxy-agent/dist/index.js';
+
+function createOpenAIClient(apiKey: string): OpenAI {
+  const proxyUrl = process.env.OPENAI_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+  const rejectUnauthorized = process.env.OPENAI_PROXY_REJECT_UNAUTHORIZED !== 'false';
+
+  // In local MITM debugging mode, disable Node TLS verification so forged MITM certs are accepted.
+  if (!rejectUnauthorized) {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+  }
+
+  if (!proxyUrl) {
+    return new OpenAI({ apiKey });
+  }
+
+  const proxyAgent = new HttpsProxyAgent(proxyUrl, { rejectUnauthorized });
+  console.log(`[OpenAI] Proxy enabled for outbound requests: ${proxyUrl}`);
+
+  return new OpenAI({
+    apiKey,
+    httpAgent: proxyAgent
+  });
+}
 
 interface Comment {
   username: string;
@@ -32,9 +55,7 @@ export async function analyzeCommentsForBuyingIntent(
   }
 ): Promise<BuyingIntentResult[]> {
   
-  const openai = new OpenAI({
-    apiKey: userConfig.openaiApiKey
-  });
+  const openai = createOpenAIClient(userConfig.openaiApiKey);
 
   const includeDmGeneration = options?.includeDmGeneration !== false;
 
@@ -156,7 +177,7 @@ ${requirements}`;
         { role: 'system' as const, content: systemPrompt },
         { role: 'user' as const, content: userPrompt }
       ],
-      temperature: 0.7,
+      temperature: 0.1,
       response_format: { type: 'json_object' as const }
     };
 
@@ -233,7 +254,7 @@ export async function generateAffiliateComment(
   brandVoice: string,
   openaiApiKey: string
 ): Promise<string> {
-  const openai = new OpenAI({ apiKey: openaiApiKey });
+  const openai = createOpenAIClient(openaiApiKey);
 
   const systemPrompt = `You are an expert social media content creator. Your job is to write a TikTok comment that sounds natural and human — NOT like a sales pitch or bot.
 
@@ -291,7 +312,7 @@ export async function generateAffiliateProspectDM(
   brandVoice: string,
   openaiApiKey: string
 ): Promise<string> {
-  const openai = new OpenAI({ apiKey: openaiApiKey });
+  const openai = createOpenAIClient(openaiApiKey);
 
   const systemPrompt = `You write warm, human TikTok DMs that feel personal and natural.
 
@@ -357,7 +378,7 @@ interface StatusUnknownClassificationResult {
 export async function classifyStatusUnknownProspect(
   input: StatusUnknownClassificationInput
 ): Promise<StatusUnknownClassificationResult> {
-  const openai = new OpenAI({ apiKey: input.openaiApiKey });
+  const openai = createOpenAIClient(input.openaiApiKey);
 
   const systemPrompt = `You classify TikTok users for an affiliate outreach system.
 
