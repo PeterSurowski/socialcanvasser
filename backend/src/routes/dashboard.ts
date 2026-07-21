@@ -14,7 +14,7 @@ router.get('/stats', authenticateToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.userId;
 
-    // Get date range (last 30 days)
+    // Get per-day stats across all time
     const [dailyStats]: any = await db.query(
       `SELECT 
          date,
@@ -24,7 +24,7 @@ router.get('/stats', authenticateToken, async (req: AuthRequest, res) => {
          SUM(CASE WHEN action_type = 'comment_reply_received' THEN 1 ELSE 0 END) as comment_replies,
          SUM(CASE WHEN action_type = 'comment_liked' THEN 1 ELSE 0 END) as comment_likes
        FROM activity_logs
-       WHERE user_id = ? AND date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+       WHERE user_id = ?
        GROUP BY date
        ORDER BY date DESC`,
       [userId]
@@ -73,13 +73,11 @@ router.get('/stats', authenticateToken, async (req: AuthRequest, res) => {
   }
 });
 
-// Get account-specific stats for a date range
+// Get account-specific stats (all time)
 router.get('/account-stats/:accountId', authenticateToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.userId;
     const accountId = parseInt(req.params.accountId);
-    const startDate = req.query.startDate as string || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    const endDate = req.query.endDate as string || new Date().toISOString().split('T')[0];
 
     // Verify the account belongs to this user
     const [accountCheck]: any = await db.query(
@@ -95,26 +93,21 @@ router.get('/account-stats/:accountId', authenticateToken, async (req: AuthReque
     const [dmsResult]: any = await db.query(
       `SELECT COUNT(*) as count FROM activity_logs 
        WHERE tiktok_account_id = ? 
-         AND action_type = 'dm_sent' 
-         AND DATE(created_at) >= ? 
-         AND DATE(created_at) <= ?`,
-      [accountId, startDate, endDate]
+         AND action_type = 'dm_sent'`,
+      [accountId]
     );
 
     // Get comment replies posted
     const [commentsResult]: any = await db.query(
       `SELECT COUNT(*) as count FROM activity_logs 
        WHERE tiktok_account_id = ? 
-         AND action_type = 'comment_posted' 
-         AND DATE(created_at) >= ? 
-         AND DATE(created_at) <= ?`,
-      [accountId, startDate, endDate]
+         AND action_type = 'comment_posted'`,
+      [accountId]
     );
 
     res.json({
       accountId,
-      startDate,
-      endDate,
+      period: 'all-time',
       dms_sent: (dmsResult[0] as any)?.count || 0,
       comment_replies: (commentsResult[0] as any)?.count || 0
     });
@@ -124,13 +117,11 @@ router.get('/account-stats/:accountId', authenticateToken, async (req: AuthReque
   }
 });
 
-// Get affiliate account-specific stats for a date range
+// Get affiliate account-specific stats (all time)
 router.get('/affiliate-account-stats/:accountId', authenticateToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.userId;
     const accountId = parseInt(req.params.accountId);
-    const startDate = req.query.startDate as string || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    const endDate = req.query.endDate as string || new Date().toISOString().split('T')[0];
 
     const [accountCheck]: any = await db.query(
       'SELECT id FROM tiktok_accounts WHERE id = ? AND user_id = ?',
@@ -146,10 +137,8 @@ router.get('/affiliate-account-stats/:accountId', authenticateToken, async (req:
        FROM affiliate_prospects
        WHERE user_id = ?
          AND incogniton_account_id = ?
-         AND last_interaction_at IS NOT NULL
-         AND DATE(last_interaction_at) >= ?
-         AND DATE(last_interaction_at) <= ?`,
-      [userId, accountId, startDate, endDate]
+         AND last_interaction_at IS NOT NULL`,
+      [userId, accountId]
     );
 
     const [videoRows]: any = await db.query(
@@ -162,9 +151,8 @@ router.get('/affiliate-account-stats/:accountId', authenticateToken, async (req:
         AND ap.tiktok_username = iv.tiktok_username
        WHERE iv.user_id = ?
          AND ap.incogniton_account_id = ?
-         AND DATE(iv.interacted_at) >= ?
-         AND DATE(iv.interacted_at) <= ?`,
-      [userId, accountId, startDate, endDate]
+      `,
+      [userId, accountId]
     );
 
     const [followedRows]: any = await db.query(
@@ -172,10 +160,8 @@ router.get('/affiliate-account-stats/:accountId', authenticateToken, async (req:
        FROM affiliate_prospects
        WHERE user_id = ?
          AND incogniton_account_id = ?
-         AND is_following = 1
-         AND DATE(updated_at) >= ?
-         AND DATE(updated_at) <= ?`,
-      [userId, accountId, startDate, endDate]
+         AND is_following = 1`,
+      [userId, accountId]
     );
 
     const [followedUsRows]: any = await db.query(
@@ -183,10 +169,8 @@ router.get('/affiliate-account-stats/:accountId', authenticateToken, async (req:
        FROM affiliate_prospects
        WHERE user_id = ?
          AND incogniton_account_id = ?
-         AND is_following_us = 1
-         AND DATE(updated_at) >= ?
-         AND DATE(updated_at) <= ?`,
-      [userId, accountId, startDate, endDate]
+         AND is_following_us = 1`,
+      [userId, accountId]
     );
 
     const [commentsLikedRows]: any = await db.query(
@@ -194,10 +178,8 @@ router.get('/affiliate-account-stats/:accountId', authenticateToken, async (req:
        FROM activity_logs
        WHERE user_id = ?
          AND tiktok_account_id = ?
-         AND action_type = 'comment_liked'
-         AND DATE(created_at) >= ?
-         AND DATE(created_at) <= ?`,
-      [userId, accountId, startDate, endDate]
+         AND action_type = 'comment_liked'`,
+      [userId, accountId]
     );
 
     const [commentRepliesRows]: any = await db.query(
@@ -205,16 +187,13 @@ router.get('/affiliate-account-stats/:accountId', authenticateToken, async (req:
        FROM activity_logs
        WHERE user_id = ?
          AND tiktok_account_id = ?
-         AND action_type = 'comment_reply_received'
-         AND DATE(created_at) >= ?
-         AND DATE(created_at) <= ?`,
-      [userId, accountId, startDate, endDate]
+         AND action_type = 'comment_reply_received'`,
+      [userId, accountId]
     );
 
     res.json({
       accountId,
-      startDate,
-      endDate,
+      period: 'all-time',
       prospects_in_pipeline: Number((pipelineRows[0] as any)?.count || 0),
       videos_liked: Number((videoRows[0] as any)?.videos_liked || 0),
       comments_left: Number((videoRows[0] as any)?.comments_left || 0),

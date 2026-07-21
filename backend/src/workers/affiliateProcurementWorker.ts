@@ -94,6 +94,12 @@ interface SearchVideoCandidate {
   profileUrl: string;
 }
 
+interface ProspectNavigationResult {
+  landedUsername: string | null;
+  usedSearch: boolean;
+  usedFallback: boolean;
+}
+
 interface Tier1SelectionResult {
   prospect: ProspectRow | null;
   allReachableProspectsSnoozed: boolean;
@@ -119,6 +125,245 @@ function normalizeTikTokUrl(href: string): string {
 function extractUsernameFromTikTokUrl(url: string): string | null {
   const match = url.match(/\/@([^/?]+)/);
   return match?.[1] || null;
+}
+
+function normalizeTikTokUsername(username: string): string {
+  return String(username || '').trim().replace(/^@+/, '').toLowerCase();
+}
+
+async function typeLikeHuman(page: Page, text: string): Promise<void> {
+  for (const ch of text) {
+    await page.keyboard.type(ch, { delay: randomInt(60, 150) });
+    if (Math.random() < 0.08) {
+      await delay(randomInt(70, 200));
+    }
+  }
+}
+
+async function findAndFocusTikTokSearchInput(page: Page): Promise<boolean> {
+  const selectors = [
+    '[data-e2e="search-user-input"]',
+    'input[data-e2e="search-user-input"]',
+    'input[type="search"]',
+    'input[placeholder*="Search"]',
+    'input[name="q"]'
+  ];
+
+  for (const selector of selectors) {
+    try {
+      const handle = await page.$(selector);
+      if (!handle) continue;
+
+      await handle.evaluate((el) => {
+        const input = el as HTMLInputElement;
+        input.focus();
+        input.click();
+      });
+
+      return true;
+    } catch {
+    }
+  }
+
+  return false;
+}
+
+async function openTikTokSearchViaUi(page: Page): Promise<boolean> {
+  const clicked = await page.evaluate(() => {
+    const candidates = Array.from(
+      document.querySelectorAll(
+        'a[href*="/search"], button[aria-label*="Search" i], [role="button"][aria-label*="Search" i], [data-e2e*="search" i]'
+      )
+    ) as HTMLElement[];
+
+    const visible = candidates.filter((el) => {
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    });
+
+    if (!visible.length) return false;
+
+    // Prefer controls near the top-left nav region where the magnifier normally sits.
+    visible.sort((a, b) => {
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      const aScore = ar.left + ar.top;
+      const bScore = br.left + br.top;
+      return aScore - bScore;
+    });
+
+    const target = visible[0];
+    target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    target.click();
+    return true;
+  });
+
+  if (!clicked) {
+    return false;
+  }
+
+  await delay(randomInt(500, 900));
+  return true;
+}
+
+async function navigateToProspectProfile(
+  page: Page,
+  targetUsername: string,
+  profileUrl: string
+): Promise<ProspectNavigationResult> {
+  const normalizedTarget = normalizeTikTokUsername(targetUsername);
+
+  try {
+    // Prefer opening search through TikTok's UI controls (magnifier/search nav) over direct URL entry.
+    let openedSearch = await openTikTokSearchViaUi(page);
+
+    if (!openedSearch) {
+      try {
+        await page.goto('https://www.tiktok.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await delay(randomInt(700, 1200));
+      } catch {
+      }
+      openedSearch = await openTikTokSearchViaUi(page);
+    }
+
+    // Final fallback keeps automation resilient if TikTok hides or reshuffles nav controls.
+    if (!openedSearch) {
+      await page.goto('https://www.tiktok.com/search', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await delay(randomInt(700, 1300));
+    }
+
+    const focused = await findAndFocusTikTokSearchInput(page);
+    if (focused) {
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyA');
+      await page.keyboard.up('Control');
+      await delay(randomInt(90, 220));
+      await page.keyboard.press('Backspace');
+      await delay(randomInt(120, 260));
+
+      await typeLikeHuman(page, normalizedTarget);
+      await delay(randomInt(180, 420));
+      await page.keyboard.press('Enter');
+
+      try {
+        await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 12000 });
+      } catch {
+      }
+
+      // Give TikTok user search results time to render before selecting a profile.
+      try {
+        await page.waitForFunction(
+          () => {
+            const anchors = Array.from(document.querySelectorAll('a[href*="/@"]')) as HTMLAnchorElement[];
+            return anchors.some((anchor) => {
+              const href = anchor.getAttribute('href') || anchor.href || '';
+              return Boolean(href) && !href.includes('/video/');
+            });
+          },
+          { timeout: 5000 }
+        );
+      } catch {
+        console.log(`[Affiliate Worker] Search results did not fully render within 5s for @${targetUsername}; continuing with available DOM`);
+      }
+
+      await delay(randomInt(1100, 1900));
+
+      const selectedHref = await page.evaluate((target) => {
+        const normalize = (value: string): string => String(value || '').trim().replace(/^@+/, '').toLowerCase();
+        const anchors = Array.from(document.querySelectorAll('a[href*="/@"]')) as HTMLAnchorElement[];
+        const candidates: Array<{ href: string; username: string; score: number }> = [];
+        const seen = new Set<string>();
+
+        for (const anchor of anchors) {
+          const href = anchor.getAttribute('href') || anchor.href || '';
+          if (!href || href.includes('/video/')) continue;
+
+          const absolute = href.startsWith('http') ? href : `https://www.tiktok.com${href}`;
+          if (seen.has(absolute)) continue;
+          seen.add(absolute);
+
+          const match = absolute.match(/\/@([^/?#]+)/);
+          const username = normalize(match?.[1] || '');
+          if (!username) continue;
+          if (username !== target) continue;
+
+          const parentText = (anchor.closest('[data-e2e*="search"], [class*="Search"], [class*="Item"]')?.textContent || '').trim();
+          const score = parentText ? 2 : 1;
+          candidates.push({ href: absolute, username, score });
+        }
+
+        candidates.sort((a, b) => b.score - a.score);
+        return candidates[0]?.href || null;
+      }, normalizedTarget);
+
+      if (selectedHref) {
+        const clicked = await page.evaluate((hrefToClick) => {
+          const anchors = Array.from(document.querySelectorAll('a[href*="/@"]')) as HTMLAnchorElement[];
+          for (const anchor of anchors) {
+            const href = anchor.getAttribute('href') || anchor.href || '';
+            const absolute = href.startsWith('http') ? href : `https://www.tiktok.com${href}`;
+            if (absolute !== hrefToClick) continue;
+
+            const rect = anchor.getBoundingClientRect();
+            const style = window.getComputedStyle(anchor);
+            const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+            if (!visible) continue;
+
+            anchor.scrollIntoView({ block: 'center', inline: 'nearest' });
+            anchor.click();
+            return true;
+          }
+
+          return false;
+        }, selectedHref);
+
+        if (clicked) {
+          try {
+            await page.waitForFunction(
+              () => /\/@[^/?#]+/.test(window.location.pathname + window.location.search),
+              { timeout: 15000 }
+            );
+          } catch {
+          }
+
+          await delay(randomInt(700, 1400));
+          const landedBySearch = extractUsernameFromTikTokUrl(page.url());
+          if (landedBySearch && normalizeTikTokUsername(landedBySearch) === normalizedTarget) {
+            console.log(`[Affiliate Worker] Navigated to @${landedBySearch} via TikTok search click`);
+            return {
+              landedUsername: landedBySearch,
+              usedSearch: true,
+              usedFallback: false
+            };
+          }
+        }
+      }
+    }
+  } catch (searchNavError) {
+    console.log(`[Affiliate Worker] Search-first navigation failed for @${targetUsername}; will fallback to direct URL:`, searchNavError);
+  }
+
+  try {
+    await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  } catch {
+    return {
+      landedUsername: null,
+      usedSearch: false,
+      usedFallback: true
+    };
+  }
+
+  const landedFallback = extractUsernameFromTikTokUrl(page.url());
+  if (landedFallback) {
+    console.log(`[Affiliate Worker] Navigated to @${landedFallback} via direct URL fallback`);
+  }
+
+  return {
+    landedUsername: landedFallback,
+    usedSearch: false,
+    usedFallback: true
+  };
 }
 
 function parseFollowerCount(raw: string | null | undefined): number | null {
@@ -2466,14 +2711,8 @@ async function processProspect(
   let canonicalUsername = prospect.tiktok_username;
   let profileUrl = prospect.profile_url || `https://www.tiktok.com/@${canonicalUsername}`;
 
-  try {
-    await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  } catch {
-    return false;
-  }
-
-  const landedUrl = page.url();
-  const landedUsername = extractUsernameFromTikTokUrl(landedUrl);
+  const initialNavigation = await navigateToProspectProfile(page, canonicalUsername, profileUrl);
+  const landedUsername = initialNavigation.landedUsername;
   if (!landedUsername) {
     return false;
   }
@@ -2523,9 +2762,8 @@ async function processProspect(
 
   await watchRandomVideos(page, profileVideoUrls, profileUrl);
 
-  try {
-    await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
-  } catch {
+  const refreshedNavigation = await navigateToProspectProfile(page, canonicalUsername, profileUrl);
+  if (!refreshedNavigation.landedUsername) {
     return true;
   }
 
@@ -2853,7 +3091,10 @@ async function processStatusUnknownProspectsForAccount(
   for (const prospect of prospects) {
     try {
       const profileUrl = prospect.profile_url || `https://www.tiktok.com/@${prospect.tiktok_username}`;
-      await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      const navigation = await navigateToProspectProfile(page, prospect.tiktok_username, profileUrl);
+      if (!navigation.landedUsername) {
+        continue;
+      }
 
       await waitForProfileMetaToLoad(page);
       const profileMeta = await scrapeProfileMeta(page);
@@ -2890,7 +3131,7 @@ async function processStatusUnknownProspectsForAccount(
         }
 
         try {
-          await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+          await navigateToProspectProfile(page, prospect.tiktok_username, profileUrl);
         } catch {
         }
       }

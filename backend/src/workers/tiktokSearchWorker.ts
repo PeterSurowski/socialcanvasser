@@ -1964,12 +1964,7 @@ export async function searchTikTokByKeywords(
 async function getNextAvailableAccount(userId: number, currentAccountId: number, preferredGroupId: number | null = null): Promise<any | null> {
   const connection = await db.getConnection();
   try {
-    // Query for next available account:
-    // 1. Belongs to this user
-    // 2. Is active
-    // 3. NOT paused
-    // 4. NOT rate limited OR rate limit has expired
-    // 5. Preferably a different account than current (for rotation)
+    // Query all available accounts and pick the next one by id (with wrap-around).
     const [accounts] = await connection.query(
       `SELECT id, account_identifier, session_data, actions_per_session, current_session_actions, 
               is_rate_limited, rate_limit_expires_at, last_keyword_index, group_id
@@ -1978,13 +1973,8 @@ async function getNextAvailableAccount(userId: number, currentAccountId: number,
          AND is_active = 1 
          AND is_paused = FALSE
          AND (is_rate_limited = FALSE OR rate_limit_expires_at IS NULL OR rate_limit_expires_at < NOW())
-       ORDER BY 
-         CASE WHEN id = ? THEN 0 ELSE 1 END DESC,  -- Prefer different account (1=different comes first with DESC)
-         CASE WHEN group_id = ? THEN 1 ELSE 0 END DESC,  -- Prefer checkpoint Group when resuming
-         last_used_at ASC,  -- Least recently used first
-         id ASC
-       LIMIT 1`,
-      [userId, currentAccountId, preferredGroupId ?? -1]
+       ORDER BY id ASC`,
+      [userId]
     );
     
     if (!accounts || (accounts as any[]).length === 0) {
@@ -1992,7 +1982,25 @@ async function getNextAvailableAccount(userId: number, currentAccountId: number,
       return null;
     }
     
-    const account = (accounts as any[])[0];
+    const availableAccounts = accounts as any[];
+
+    let rotationPool = availableAccounts;
+    if (preferredGroupId !== null) {
+      const sameGroup = availableAccounts.filter((a) => Number(a.group_id || 0) === preferredGroupId);
+      if (sameGroup.length > 0) {
+        rotationPool = sameGroup;
+      }
+    }
+
+    let account = rotationPool.find((a) => Number(a.id) > currentAccountId) || null;
+    if (!account) {
+      account = rotationPool[0] || null;
+    }
+
+    if (!account) {
+      return null;
+    }
+
     console.log(`[Account Rotation] ✅ Selected account ${account.id} (@${account.account_identifier})`);
     
     // Update last_used_at timestamp
@@ -2127,6 +2135,56 @@ async function getAutomationCheckpoint(userId: number): Promise<AutomationCheckp
       engagementIndex: row.checkpoint_engagement_index ?? null,
       engagementUsername: row.checkpoint_engagement_username ?? null
     };
+  } finally {
+    connection.release();
+  }
+}
+
+async function getLastSearchAccountId(userId: number): Promise<number | null> {
+  const connection = await db.getConnection();
+  try {
+    const [rows] = await connection.query(
+      `SELECT current_tiktok_account_id
+       FROM automation_state
+       WHERE user_id = ?
+       LIMIT 1`,
+      [userId]
+    );
+
+    const row = (rows as any[])[0];
+    const accountId = Number(row?.current_tiktok_account_id || 0);
+    if (accountId > 0) {
+      return accountId;
+    }
+
+    // Backward-compatible fallback for users who ran automation before this cursor was persisted.
+    const [fallbackRows] = await connection.query(
+      `SELECT id
+       FROM tiktok_accounts
+       WHERE user_id = ?
+         AND is_active = 1
+         AND last_used_at IS NOT NULL
+       ORDER BY last_used_at DESC, id DESC
+       LIMIT 1`,
+      [userId]
+    );
+
+    const fallbackId = Number((fallbackRows as any[])[0]?.id || 0);
+    return fallbackId > 0 ? fallbackId : null;
+  } finally {
+    connection.release();
+  }
+}
+
+async function setLastSearchAccountId(userId: number, accountId: number): Promise<void> {
+  const connection = await db.getConnection();
+  try {
+    await connection.query(
+      `INSERT INTO automation_state (user_id, current_tiktok_account_id)
+       VALUES (?, ?)
+       ON DUPLICATE KEY UPDATE current_tiktok_account_id = VALUES(current_tiktok_account_id)`,
+      [userId, accountId]
+    );
   } finally {
     connection.release();
   }
@@ -2363,8 +2421,9 @@ export async function runTikTokSearchForAccounts(userId: number) {
     // Load resume checkpoint (if any)
     const checkpoint = await getAutomationCheckpoint(userId);
     const preferredResumeGroupId = Number(checkpoint?.groupId || 0) || null;
+    const lastSearchAccountId = await getLastSearchAccountId(userId);
     
-    // PHASE 3: Start with checkpoint account if available, otherwise first available account
+    // PHASE 3: Start with checkpoint account if available, otherwise continue from account after the last used one
     let currentAccount: any = null;
     if (checkpoint?.accountId) {
       const [checkpointAccountRows] = await connection.query(
@@ -2389,13 +2448,15 @@ export async function runTikTokSearchForAccounts(userId: number) {
     }
     
     if (!currentAccount) {
-      currentAccount = await getNextAvailableAccount(userId, -1, preferredResumeGroupId);
+      currentAccount = await getNextAvailableAccount(userId, lastSearchAccountId ?? -1, preferredResumeGroupId);
     }
     
     if (!currentAccount) {
       console.log('[TikTok Search Worker] No available accounts to start with');
       return;
     }
+
+    await setLastSearchAccountId(userId, currentAccount.id);
     
     // ACCOUNT ROTATION LOOP: Continue searching with different accounts until all exhausted
     while (currentAccount) {
@@ -2631,6 +2692,7 @@ export async function runTikTokSearchForAccounts(userId: number) {
           text: `🔄 Rotating to account @${nextAccount.account_identifier}...`
         });
         currentAccount = nextAccount;
+        await setLastSearchAccountId(userId, currentAccount.id);
         // Loop will continue with new account
       } else {
         console.log('[TikTok Search Worker] ✅ All accounts completed - no more available accounts');
@@ -2675,6 +2737,7 @@ export async function runTikTokSearchForAccounts(userId: number) {
           text: `⚠️ Error on previous account, switching to next...`
         });
         currentAccount = nextAccount;
+        await setLastSearchAccountId(userId, currentAccount.id);
       } else {
         console.log('[TikTok Search Worker] ❌ Error occurred and no more accounts available');
         currentAccount = null; // Exit loop
